@@ -3,6 +3,7 @@ from app import process_video
 from utils import download_s3_file, send_sqs_message
 
 def handler(event):
+    print("🚀 HANDLER STARTED with event:", event)  # DEBUG
     bucket = event["input"]["s3_bucket"]
     video_key = event["input"]["video_key"]
     lines_key = event["input"]["lines_key"]

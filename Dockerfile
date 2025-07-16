@@ -25,4 +25,4 @@ RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/wh
 RUN pip install --no-cache-dir -r requirements.txt
 
 # RunPod serverless expects handler(event) in handler.py
-CMD ["python", "handler.py"]
+CMD ["python", "-m", "runpod"]
