@@ -1,7 +1,7 @@
 import os
 import runpod
-from src.app import process_video
-from src.utils import download_s3_file, send_sqs_message
+from app import process_video
+from utils import download_s3_file, send_sqs_message
 
 def handler(event):
     print("🚀 HANDLER STARTED with event:", event)  # DEBUG
