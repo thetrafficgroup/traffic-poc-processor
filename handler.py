@@ -1,0 +1,23 @@
+import os
+from app import process_video
+from utils import download_s3_file, send_sqs_message
+
+def handler(event):
+    bucket = event["input"]["s3_bucket"]
+    video_key = event["input"]["video_key"]
+    lines_key = event["input"]["lines_key"]
+    model_key = event["input"]["model_key"]
+    queue_url = event["input"]["queue_url"]
+
+    video_path = download_s3_file(bucket, video_key, "video.mp4")
+    lines_path = download_s3_file(bucket, lines_key, "lines.json")
+    model_path = download_s3_file(bucket, model_key, "best.pt")
+
+    results = process_video(video_path, lines_path, model_path)
+
+    send_sqs_message(queue_url, {
+        "video": video_key,
+        "results": results
+    })
+
+    return {"status": "ok", "results": results}
