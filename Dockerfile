@@ -1,7 +1,6 @@
 # Imagen base oficial con CUDA 11.8 y Python 3.10
 FROM nvidia/cuda:11.8.0-cudnn8-runtime-ubuntu22.04
 
-# Evitar interacciones en la instalación
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Instalar dependencias del sistema
@@ -14,18 +13,16 @@ RUN apt-get update && apt-get install -y \
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.10 1
 RUN update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
 
-# Crear carpeta de trabajo
 WORKDIR /app
 
-# Copiar los archivos del repositorio
 COPY . .
 
-# Instalar PyTorch, Torchvision, Torchaudio con CUDA 11.8
+# Instalar PyTorch + CUDA 11.8
 RUN pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cu118 \
     torch==2.7.1+cu118 torchvision==0.22.1+cu118 torchaudio==2.7.1+cu118
 
-# Instalar dependencias restantes del proyecto
+# Instalar otras dependencias
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Entrypoint para RunPod (handler.handler → handler.py → def handler(event))
-CMD ["python", "-m", "runpod"]
+# RunPod serverless expects handler(event) in handler.py
+CMD ["python", "handler.py"]
