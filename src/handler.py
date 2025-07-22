@@ -7,6 +7,7 @@ def handler(event):
     print("🚀 HANDLER STARTED with event:", event)  # DEBUG
     bucket = event["input"]["s3_bucket"]
     video_key = event["input"]["video_key"]
+    video_uuid = event["input"]["video_uuid"]
     lines_data = event["input"]["lines"]
     model_key = event["input"]["model_key"]
     queue_url = event["input"]["queue_url"]
@@ -17,6 +18,7 @@ def handler(event):
     results = process_video(video_path, lines_data, model_path)
 
     send_sqs_message(queue_url, {
+        "videoUuid": video_uuid,
         "video": video_key,
         "results": results
     })
