@@ -9,11 +9,10 @@ IOU_THRESHOLD = 0.2
 DIST_THRESHOLD = 10
 
 
-def process_video(VIDEO_PATH, LINES_PATH, MODEL_PATH="best.pt"):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt"):
     model = YOLO(MODEL_PATH)
 
-    with open(LINES_PATH, "r") as f:
-        raw_lines = json.load(f)
+    raw_lines = LINES_DATA
 
     LINES = []
     for name, data in raw_lines.items():
