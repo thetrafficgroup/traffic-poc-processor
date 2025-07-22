@@ -15,10 +15,19 @@ def handler(event):
     video_path = download_s3_file(bucket, video_key, "video.mp4")
     model_path = download_s3_file(bucket, model_key, "best.pt")
 
-    results = process_video(video_path, lines_data, model_path)
+    def progress_callback(progress_data):
+        send_sqs_message(queue_url, {
+            "videoUuid": video_uuid,
+            "status": "processing",
+            "progress": progress_data["progress"],
+            "estimatedTimeRemaining": progress_data["estimatedTimeRemaining"]
+        })
+
+    results = process_video(video_path, lines_data, model_path, progress_callback)
 
     send_sqs_message(queue_url, {
         "videoUuid": video_uuid,
+        "status": "completed",
         "video": video_key,
         "results": results
     })

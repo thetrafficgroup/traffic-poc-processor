@@ -1,5 +1,6 @@
 import cv2
 import json
+import time
 from collections import Counter
 from ultralytics import YOLO
 
@@ -9,7 +10,7 @@ IOU_THRESHOLD = 0.2
 DIST_THRESHOLD = 10
 
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt"):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None):
     model = YOLO(MODEL_PATH)
 
     raw_lines = LINES_DATA
@@ -72,6 +73,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt"):
         return transitions.get((from_dir, to_dir), "unknown")
 
     cap = cv2.VideoCapture(VIDEO_PATH)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    current_frame = 0
+    start_time = time.time()
+    last_progress_sent = -1
+    
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -122,6 +128,26 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt"):
                                 turn_types_by_id[obj_id] = turn_type
 
                 prev_centroids[obj_id] = (cx, cy)
+        
+        # Progress tracking
+        current_frame += 1
+        if progress_callback and total_frames > 0:
+            progress = int((current_frame / total_frames) * 100)
+            
+            # Send progress every 5%
+            if progress >= last_progress_sent + 5 and progress < 100:
+                elapsed_time = time.time() - start_time
+                if progress > 0:
+                    estimated_total_time = elapsed_time / (progress / 100)
+                    estimated_remaining_time = int(estimated_total_time - elapsed_time)
+                else:
+                    estimated_remaining_time = 0
+                
+                progress_callback({
+                    "progress": progress,
+                    "estimatedTimeRemaining": max(0, estimated_remaining_time)
+                })
+                last_progress_sent = progress
 
     cap.release()
 
