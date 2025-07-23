@@ -22,8 +22,30 @@ def send_sqs_message(queue_url, payload):
     )
 
 def upload_s3_file(local_path, bucket, key):
-    """Upload a local file to S3 bucket"""
+    """Upload a local file to S3 bucket with proper content type"""
     print(f"→ Subiendo {local_path} a s3://{bucket}/{key}...")
-    s3.upload_file(local_path, bucket, key)
-    print(f"✓ Archivo subido exitosamente")
+    
+    # Determine content type based on file extension
+    content_type = "application/octet-stream"  # default
+    if key.lower().endswith('.mp4'):
+        content_type = "video/mp4"
+    elif key.lower().endswith('.avi'):
+        content_type = "video/x-msvideo"
+    elif key.lower().endswith('.mov'):
+        content_type = "video/quicktime"
+    elif key.lower().endswith('.mkv'):
+        content_type = "video/x-matroska"
+    
+    s3.upload_file(
+        local_path, 
+        bucket, 
+        key,
+        ExtraArgs={
+            'ContentType': content_type,
+            'Metadata': {
+                'uploaded-by': 'traffic-cv-processor'
+            }
+        }
+    )
+    print(f"✓ Archivo subido exitosamente con content-type: {content_type}")
     return f"s3://{bucket}/{key}"
