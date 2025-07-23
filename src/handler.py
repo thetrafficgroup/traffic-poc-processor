@@ -11,6 +11,7 @@ def handler(event):
     lines_data = event["input"]["lines"]
     model_key = event["input"]["model_key"]
     queue_url = event["input"]["queue_url"]
+    study_type = event["input"].get("study_type", "TMC")  # Default to TMC
 
     video_path = download_s3_file(bucket, video_key, "video.mp4")
     model_path = download_s3_file(bucket, model_key, "best.pt")
@@ -23,7 +24,7 @@ def handler(event):
             "estimatedTimeRemaining": progress_data["estimatedTimeRemaining"]
         })
 
-    results = process_video(video_path, lines_data, model_path, progress_callback)
+    results = process_video(video_path, lines_data, model_path, study_type, progress_callback)
 
     send_sqs_message(queue_url, {
         "videoUuid": video_uuid,
