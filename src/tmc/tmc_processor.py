@@ -10,7 +10,7 @@ IOU_THRESHOLD = 0.2
 DIST_THRESHOLD = 10
 
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None):
     model = YOLO(MODEL_PATH)
 
     raw_lines = LINES_DATA
@@ -90,6 +90,15 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     start_time = time.time()
     last_progress_sent = -1
     
+    # Initialize video writer if output video is requested  
+    video_writer = None
+    if generate_video_output and output_video_path:
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        video_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+    
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
@@ -141,6 +150,58 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                 prev_centroids[obj_id] = (cx, cy)
         
+        # Add visualizations if generating output video
+        if generate_video_output and video_writer:
+            # Draw detection boxes and tracking
+            if results[0].boxes.id is not None:
+                ids = results[0].boxes.id.cpu().numpy()
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                
+                for i, box in enumerate(boxes):
+                    obj_id = int(ids[i])
+                    x1, y1, x2, y2 = box
+                    cx, cy = get_centroid(box)
+                    
+                    # Draw bounding box
+                    cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                    
+                    # Draw centroid
+                    cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
+                    
+                    # Draw ID and turn type if available
+                    label = f'ID {obj_id}'
+                    if obj_id in turn_types_by_id:
+                        label += f' | {turn_types_by_id[obj_id]}'
+                    cv2.putText(frame, label, (cx, cy - 10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            
+            # Draw lines
+            for line in LINES:
+                name = line["name"]
+                x1, y1 = line["pt1"] 
+                x2, y2 = line["pt2"]
+                cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
+                
+                # Draw line label and count
+                mid_x, mid_y = (x1 + x2) // 2, (y1 + y2) // 2
+                cv2.putText(frame, f'{name}: {counts[name]}', (mid_x, mid_y - 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            
+            # Draw summary stats
+            total_current = sum(counts.values())
+            turn_summary = dict(Counter(turn_types_by_id.values()))
+            y_pos = 30
+            cv2.putText(frame, f'Total Crossings: {total_current}', (20, y_pos), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+            
+            for turn_type, count in turn_summary.items():
+                y_pos += 25
+                cv2.putText(frame, f'{turn_type}: {count}', (20, y_pos),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            
+            # Write frame to output video
+            video_writer.write(frame)
+        
         # Progress tracking
         current_frame += 1
         if progress_callback and total_frames > 0:
@@ -162,6 +223,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 last_progress_sent = progress
 
     cap.release()
+    if video_writer:
+        video_writer.release()
 
     # Post procesamiento
     all_ids = []

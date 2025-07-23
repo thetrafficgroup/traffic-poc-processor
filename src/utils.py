@@ -20,3 +20,10 @@ def send_sqs_message(queue_url, payload):
         QueueUrl=queue_url,
         MessageBody=json.dumps(payload)
     )
+
+def upload_s3_file(local_path, bucket, key):
+    """Upload a local file to S3 bucket"""
+    print(f"→ Subiendo {local_path} a s3://{bucket}/{key}...")
+    s3.upload_file(local_path, bucket, key)
+    print(f"✓ Archivo subido exitosamente")
+    return f"s3://{bucket}/{key}"

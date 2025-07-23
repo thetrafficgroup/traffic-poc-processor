@@ -93,7 +93,7 @@ def point_side_of_line(p, a, b):
     # Ensure all coordinates are numeric (handle potential float/int mix)
     return (float(b[0]) - float(a[0])) * (float(p[1]) - float(a[1])) - (float(b[1]) - float(a[1])) * (float(p[0]) - float(a[0]))
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None):
     """
     Process video for ATR (Automatic Traffic Recording) analysis.
     
@@ -140,6 +140,15 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     frame_count = 0
     last_progress_sent = -1
     start_time = time.time()
+    
+    # Initialize video writer if output video is requested
+    video_writer = None
+    if generate_video_output and output_video_path:
+        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        video_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
     
     # Process video frames
     while cap.isOpened():
@@ -224,10 +233,59 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     lane_counts[lane_id] += 1
                     print(f"[ATR COUNTED] Vehicle ID={objectID} | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
         
+        # Add visualizations if generating output video
+        if generate_video_output and video_writer:
+            # Draw detections and tracking
+            for objectID, centroid in objects.items():
+                cx, cy = int(centroid[0]), int(centroid[1])
+                
+                # Find lane for this object
+                pt = Point(cx, cy)
+                lane_id = None
+                for lid, polygon in lane_polygons:
+                    if polygon.buffer(8).contains(pt):
+                        lane_id = lid
+                        break
+                
+                # Draw bounding box if available
+                if (cx, cy) in detections_map:
+                    x1, y1, x2, y2 = detections_map[(cx, cy)]
+                    cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                
+                # Draw centroid
+                color = (0, 255, 0) if lane_id is not None else (0, 0, 255)
+                cv2.circle(frame, (cx, cy), 5, color, -1)
+                cv2.putText(frame, f'ID {objectID} | L{lane_id}', (cx, cy - 10),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+            
+            # Draw finish line
+            if finish_line is not None and len(finish_line) == 2:
+                pt1 = tuple(map(int, finish_line[0]))
+                pt2 = tuple(map(int, finish_line[1]))
+                cv2.line(frame, pt1, pt2, (255, 0, 255), 3)
+            
+            # Draw lanes and counts
+            for lane in lanes:
+                pts = np.array(lane["points"], np.int32).reshape((-1, 1, 2))
+                cv2.polylines(frame, [pts], isClosed=True, color=(0, 255, 255), thickness=2)
+                cv2.putText(frame, f'L{lane["id"]}: {lane_counts[lane["id"]]}',
+                           (pts[0][0][0], pts[0][0][1] - 8),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            
+            # Draw total count
+            total_count_current = sum(lane_counts.values())
+            cv2.putText(frame, f'Total: {total_count_current}', (20, 40), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 255), 3)
+            
+            # Write frame to output video
+            video_writer.write(frame)
+        
         # Small delay to stabilize tracking (similar to cv2.waitKey in example.py)
         time.sleep(0.001)  # 1ms delay to prevent too rapid processing
     
     cap.release()
+    if video_writer:
+        video_writer.release()
     
     # Return results
     total_count = sum(lane_counts.values())
