@@ -175,11 +175,16 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 crossed_lines_by_id[obj_id].append(name)
                                 crossing_timestamps[obj_id].append((name, current_time))
 
+                            print(f'[✔] ID {obj_id} cruzó {name}')
+
                             # Detectar giro cuando haya al menos 2 cruces y no se haya clasificado aún
                             if len(crossing_timestamps[obj_id]) >= 2 and obj_id not in turn_types_by_id:
                                 turn_type = classify_turn_from_lines(crossing_timestamps[obj_id])
                                 if turn_type != 'invalid' and turn_type != 'unknown':
                                     turn_types_by_id[obj_id] = turn_type
+                                    from_line = crossing_timestamps[obj_id][0][0]
+                                    to_line = crossing_timestamps[obj_id][-1][0]
+                                    print(f'↪ ID {obj_id} hizo un giro {turn_type}: {from_line} -> {to_line}')
 
                 prev_centroids[obj_id] = (cx, cy)
         
