@@ -34,6 +34,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     prev_centroids = {}
     crossed_lines_by_id = {}
     turn_types_by_id = {}
+    crossing_timestamps = {}
 
     def get_centroid(box):
         x1, y1, x2, y2 = box
@@ -62,27 +63,37 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         dy = py - yy
         return (dx**2 + dy**2) ** 0.5
 
-    def classify_turn_from_lines(directions):
-        if len(directions) != 2:
-            return "invalid"
-        from_dir, to_dir = directions[0].upper(), directions[1].upper()
+    def classify_turn_from_lines(crossing_data):
+        if len(crossing_data) < 2:
+            return 'invalid'
+        
+        # Ordenar por timestamp para obtener la secuencia correcta
+        sorted_crossings = sorted(crossing_data, key=lambda x: x[1])  # (direction, timestamp)
+        
+        # Tomar la primera y última línea cruzada
+        from_dir = sorted_crossings[0][0].upper()
+        to_dir = sorted_crossings[-1][0].upper()
+
         if from_dir == to_dir:
-            return "u-turn"
+            return 'u-turn'
+
+        # Tabla corregida basada en perspectiva del observador desde el cielo
         transitions = {
-            ("NORTE", "ESTE"): "left",
-            ("NORTE", "OESTE"): "right",
-            ("NORTE", "SUR"): "straight",
-            ("ESTE", "SUR"): "left",
-            ("ESTE", "NORTE"): "right",
-            ("ESTE", "OESTE"): "straight",
-            ("SUR", "OESTE"): "left",
-            ("SUR", "ESTE"): "right",
-            ("SUR", "NORTE"): "straight",
-            ("OESTE", "NORTE"): "left",
-            ("OESTE", "SUR"): "right",
-            ("OESTE", "ESTE"): "straight",
+            ('NORTE', 'ESTE'): 'left',   # Norte -> Este = giro izquierda
+            ('NORTE', 'OESTE'): 'right', # Norte -> Oeste = giro derecha
+            ('NORTE', 'SUR'): 'straight',
+            ('ESTE', 'SUR'): 'left',     # Este -> Sur = giro izquierda
+            ('ESTE', 'NORTE'): 'right',  # Este -> Norte = giro derecha
+            ('ESTE', 'OESTE'): 'straight',
+            ('SUR', 'OESTE'): 'left',    # Sur -> Oeste = giro izquierda
+            ('SUR', 'ESTE'): 'right',    # Sur -> Este = giro derecha
+            ('SUR', 'NORTE'): 'straight',
+            ('OESTE', 'NORTE'): 'left',  # Oeste -> Norte = giro izquierda
+            ('OESTE', 'SUR'): 'right',   # Oeste -> Sur = giro derecha
+            ('OESTE', 'ESTE'): 'straight',
         }
-        return transitions.get((from_dir, to_dir), "unknown")
+
+        return transitions.get((from_dir, to_dir), 'unknown')
 
     cap = cv2.VideoCapture(VIDEO_PATH)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -154,19 +165,21 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             counted_ids_per_line[name].add(obj_id)
                             counts[name] += 1
 
+                            # Registrar el cruce con timestamp
                             if obj_id not in crossed_lines_by_id:
                                 crossed_lines_by_id[obj_id] = []
-                            if name not in crossed_lines_by_id[obj_id]:
+                                crossing_timestamps[obj_id] = []
+                            
+                            if name not in [crossing[0] for crossing in crossing_timestamps[obj_id]]:
+                                current_time = time.time()
                                 crossed_lines_by_id[obj_id].append(name)
+                                crossing_timestamps[obj_id].append((name, current_time))
 
-                            if (
-                                len(crossed_lines_by_id[obj_id]) == 2
-                                and obj_id not in turn_types_by_id
-                            ):
-                                turn_type = classify_turn_from_lines(
-                                    crossed_lines_by_id[obj_id]
-                                )
-                                turn_types_by_id[obj_id] = turn_type
+                            # Detectar giro cuando haya al menos 2 cruces y no se haya clasificado aún
+                            if len(crossing_timestamps[obj_id]) >= 2 and obj_id not in turn_types_by_id:
+                                turn_type = classify_turn_from_lines(crossing_timestamps[obj_id])
+                                if turn_type != 'invalid' and turn_type != 'unknown':
+                                    turn_types_by_id[obj_id] = turn_type
 
                 prev_centroids[obj_id] = (cx, cy)
         
