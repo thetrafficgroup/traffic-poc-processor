@@ -120,7 +120,10 @@ def local_test_handler(event):
     # Handle output video if generated (local testing - don't upload to S3)
     if generate_video_output and output_video_path and os.path.exists(output_video_path):
         print(f"✅ Output video generated locally: {output_video_path}")
-        results["videoOutput"] = f"local://{output_video_path}"
+        # For local testing, just return the filename (simulating the S3 key format)
+        base_key = video_key.rsplit('.', 1)[0]
+        extension = video_key.rsplit('.', 1)[1] if '.' in video_key else 'mp4'
+        results["videoOutput"] = f"{base_key}_output.{extension}"
 
     print("📤 Enviando resultado final a SQS...")
     send_sqs_message(queue_url, {

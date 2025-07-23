@@ -49,7 +49,7 @@ def handler(event):
     if generate_video_output and output_video_path and os.path.exists(output_video_path):
         print(f"📤 Uploading output video to S3: {output_video_key}")
         upload_s3_file(output_video_path, bucket, output_video_key)
-        results["videoOutput"] = f"s3://{bucket}/{output_video_key}"
+        results["videoOutput"] = output_video_key  # Only return the key/location
         
         # Clean up local output video file
         os.remove(output_video_path)
