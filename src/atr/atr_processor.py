@@ -130,6 +130,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     previous_positions = {}
     tracker = CentroidTracker(max_disappeared=15)
     
+    # Debug counters
+    debug_total_detections = 0
+    debug_tracked_objects = set()
+    
     # Initialize video capture
     cap = cv2.VideoCapture(VIDEO_PATH)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -171,17 +175,21 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         input_centroids = []
         detections_map = {}
         
-        for i, box in enumerate(boxes):
-            x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-            cx, cy = get_centroid((x1, y1, x2, y2))
-            input_centroids.append(np.array([cx, cy]))
-            detections_map[(cx, cy)] = (x1, y1, x2, y2)
+        # Only process if there are detections
+        if boxes is not None and len(boxes) > 0:
+            for i, box in enumerate(boxes):
+                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                cx, cy = get_centroid((x1, y1, x2, y2))
+                input_centroids.append(np.array([cx, cy]))
+                detections_map[(cx, cy)] = (x1, y1, x2, y2)
+                debug_total_detections += 1
         
         # Update tracker
         objects = tracker.update(np.array(input_centroids))
         
         # Process tracked objects
         for objectID, centroid in objects.items():
+            debug_tracked_objects.add(objectID)
             cx, cy = centroid
             pt = Point(cx, cy)
             lane_id = None
@@ -214,11 +222,22 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 if side_prev * side_curr < 0:  # Changed sides
                     counted_ids.add(objectID)
                     lane_counts[lane_id] += 1
+                    print(f"[ATR COUNTED] Vehicle ID={objectID} | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
+        
+        # Small delay to stabilize tracking (similar to cv2.waitKey in example.py)
+        time.sleep(0.001)  # 1ms delay to prevent too rapid processing
     
     cap.release()
     
     # Return results
     total_count = sum(lane_counts.values())
+    
+    # Debug output
+    print(f"[ATR DEBUG] Total detections: {debug_total_detections}")
+    print(f"[ATR DEBUG] Unique tracked objects: {len(debug_tracked_objects)}")
+    print(f"[ATR DEBUG] Objects counted: {len(counted_ids)}")
+    print(f"[ATR DEBUG] Final lane counts: {lane_counts}")
+    print(f"[ATR DEBUG] Total count: {total_count}")
     
     return {
         "lane_counts": lane_counts,
