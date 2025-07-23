@@ -287,7 +287,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 
                 # Draw bounding box if available
                 if (cx, cy) in detections_map:
-                    x1, y1, x2, y2 = detections_map[(cx, cy)]
+                    x1, y1, x2, y2, class_name_viz = detections_map[(cx, cy)]
                     cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
                 
                 # Draw centroid
