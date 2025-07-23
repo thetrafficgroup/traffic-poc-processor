@@ -79,18 +79,18 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
         # Tabla corregida basada en perspectiva del observador desde el cielo
         transitions = {
-            ('NORTE', 'ESTE'): 'left',   # Norte -> Este = giro izquierda
-            ('NORTE', 'OESTE'): 'right', # Norte -> Oeste = giro derecha
-            ('NORTE', 'SUR'): 'straight',
-            ('ESTE', 'SUR'): 'left',     # Este -> Sur = giro izquierda
-            ('ESTE', 'NORTE'): 'right',  # Este -> Norte = giro derecha
-            ('ESTE', 'OESTE'): 'straight',
-            ('SUR', 'OESTE'): 'left',    # Sur -> Oeste = giro izquierda
-            ('SUR', 'ESTE'): 'right',    # Sur -> Este = giro derecha
-            ('SUR', 'NORTE'): 'straight',
-            ('OESTE', 'NORTE'): 'left',  # Oeste -> Norte = giro izquierda
-            ('OESTE', 'SUR'): 'right',   # Oeste -> Sur = giro derecha
-            ('OESTE', 'ESTE'): 'straight',
+            ('NORTH', 'EAST'): 'left',   # North -> East = giro izquierda
+            ('NORTH', 'WEST'): 'right',  # North -> West = giro derecha
+            ('NORTH', 'SOUTH'): 'straight',
+            ('EAST', 'SOUTH'): 'left',   # East -> South = giro izquierda
+            ('EAST', 'NORTH'): 'right',  # East -> North = giro derecha
+            ('EAST', 'WEST'): 'straight',
+            ('SOUTH', 'WEST'): 'left',   # South -> West = giro izquierda
+            ('SOUTH', 'EAST'): 'right',  # South -> East = giro derecha
+            ('SOUTH', 'NORTH'): 'straight',
+            ('WEST', 'NORTH'): 'left',   # West -> North = giro izquierda
+            ('WEST', 'SOUTH'): 'right',  # West -> South = giro derecha
+            ('WEST', 'EAST'): 'straight',
         }
 
         return transitions.get((from_dir, to_dir), 'unknown')
