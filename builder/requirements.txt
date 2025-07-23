@@ -9,3 +9,4 @@ ultralytics
 opencv-python-headless
 boto3
 requests
+shapely
