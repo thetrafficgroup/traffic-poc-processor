@@ -4,7 +4,7 @@ import json
 import time
 from shapely.geometry import Point, Polygon
 from ultralytics import YOLO
-from collections import OrderedDict
+from collections import OrderedDict, Counter
 
 # === Centroid Tracker ===
 class CentroidTracker:
