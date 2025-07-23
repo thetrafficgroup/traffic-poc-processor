@@ -15,10 +15,18 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
     raw_lines = LINES_DATA
 
+    def ensure_int_coords(point):
+        """Convert point coordinates to integers, handling both dict and tuple formats"""
+        if isinstance(point, dict):
+            return (int(round(point["x"])), int(round(point["y"])))
+        elif isinstance(point, (list, tuple)):
+            return (int(round(point[0])), int(round(point[1])))
+        return point
+
     LINES = []
     for name, data in raw_lines.items():
-        pt1 = tuple(data["pt1"])
-        pt2 = tuple(data["pt2"])
+        pt1 = ensure_int_coords(data["pt1"])
+        pt2 = ensure_int_coords(data["pt2"])
         LINES.append({"name": name.upper(), "pt1": pt1, "pt2": pt2})
 
     counts = {line["name"]: 0 for line in LINES}
@@ -32,6 +40,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         return int((x1 + x2) / 2), int((y1 + y2) / 2)
 
     def point_line_distance(px, py, x1, y1, x2, y2):
+        # Ensure all coordinates are float for precise calculations
+        px, py = float(px), float(py)
+        x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
+        
         A = px - x1
         B = py - y1
         C = x2 - x1

@@ -71,11 +71,26 @@ def get_centroid(box):
     return int((x1 + x2) / 2), int((y1 + y2) / 2)
 
 def dict_points_to_tuples(points):
-    return [(pt["x"], pt["y"]) if isinstance(pt, dict) else tuple(pt) for pt in points]
+    """Convert points from dict format to tuples, ensuring they are integers for OpenCV"""
+    result = []
+    for pt in points:
+        if isinstance(pt, dict):
+            x = int(round(pt["x"]))  # Convert float to int and round
+            y = int(round(pt["y"]))
+            result.append((x, y))
+        else:
+            x = int(round(pt[0])) if isinstance(pt[0], float) else pt[0]
+            y = int(round(pt[1])) if isinstance(pt[1], float) else pt[1]
+            result.append((x, y))
+    return result
 
 def point_side_of_line(p, a, b):
-    # Devuelve >0 si p está a la izquierda de ab, <0 derecha, 0 sobre la línea
-    return (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+    """
+    Determine which side of line ab point p is on.
+    Returns >0 if p is left of ab, <0 if right, 0 if on line
+    """
+    # Ensure all coordinates are numeric (handle potential float/int mix)
+    return (float(b[0]) - float(a[0])) * (float(p[1]) - float(a[1])) - (float(b[1]) - float(a[1])) * (float(p[0]) - float(a[0]))
 
 def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None):
     """
@@ -129,8 +144,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         
         # Update progress
         if progress_callback:
-            progress = (frame_count / total_frames) * 100
-            progress_callback(progress)
+            progress = round((frame_count / total_frames) * 100, 2)
+            progress_callback({
+                "progress": progress,
+                "estimatedTimeRemaining": 0  # ATR doesn't calculate time remaining yet
+            })
         
         # YOLO detection
         results = model.predict(frame, conf=CONF_THRESHOLD)
