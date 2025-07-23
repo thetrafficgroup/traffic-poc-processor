@@ -96,8 +96,28 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         fps = int(cap.get(cv2.CAP_PROP_FPS))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        video_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+        
+        # Try multiple codecs for web compatibility
+        codecs_to_try = ['H264', 'X264', 'XVID', 'mp4v']
+        video_writer = None
+        
+        for codec in codecs_to_try:
+            try:
+                fourcc = cv2.VideoWriter_fourcc(*codec)
+                temp_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+                if temp_writer.isOpened():
+                    video_writer = temp_writer
+                    print(f"✅ Using video codec: {codec}")
+                    break
+                else:
+                    temp_writer.release()
+            except Exception as e:
+                print(f"⚠️ Codec {codec} failed: {e}")
+                continue
+        
+        if not video_writer:
+            print("❌ Could not initialize video writer with any codec")
+            generate_video_output = False
     
     while cap.isOpened():
         ret, frame = cap.read()

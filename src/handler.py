@@ -47,6 +47,30 @@ def handler(event):
 
     # Upload output video to S3 if generated
     if generate_video_output and output_video_path and os.path.exists(output_video_path):
+        # Try to optimize video for web streaming using ffmpeg if available
+        optimized_path = f"optimized_{output_video_path}"
+        try:
+            import subprocess
+            # Convert to web-friendly format with faststart
+            cmd = [
+                'ffmpeg', '-i', output_video_path,
+                '-c:v', 'libx264',
+                '-profile:v', 'baseline',
+                '-level', '3.0',
+                '-pix_fmt', 'yuv420p',
+                '-movflags', '+faststart',
+                '-y', optimized_path
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode == 0 and os.path.exists(optimized_path):
+                print("✅ Video optimized for web streaming")
+                os.remove(output_video_path)  # Remove original
+                output_video_path = optimized_path  # Use optimized version
+            else:
+                print(f"⚠️ FFmpeg optimization failed, using original: {result.stderr}")
+        except Exception as e:
+            print(f"⚠️ Could not optimize video with ffmpeg: {e}")
+        
         print(f"📤 Uploading output video to S3: {output_video_key}")
         upload_s3_file(output_video_path, bucket, output_video_key)
         results["videoOutput"] = output_video_key  # Only return the key/location
