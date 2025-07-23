@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import json
+import time
 from shapely.geometry import Point, Polygon
 from ultralytics import YOLO
 from collections import OrderedDict
@@ -133,6 +134,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     cap = cv2.VideoCapture(VIDEO_PATH)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     frame_count = 0
+    last_progress_sent = -1
+    start_time = time.time()
     
     # Process video frames
     while cap.isOpened():
@@ -142,13 +145,24 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             
         frame_count += 1
         
-        # Update progress
-        if progress_callback:
-            progress = round((frame_count / total_frames) * 100, 2)
-            progress_callback({
-                "progress": progress,
-                "estimatedTimeRemaining": 0  # ATR doesn't calculate time remaining yet
-            })
+        # Progress tracking (send every 5% like TMC)
+        if progress_callback and total_frames > 0:
+            progress = int((frame_count / total_frames) * 100)
+            
+            # Send progress every 5%
+            if progress >= last_progress_sent + 5 and progress < 100:
+                elapsed_time = time.time() - start_time
+                if progress > 0:
+                    estimated_total_time = elapsed_time / (progress / 100)
+                    estimated_remaining_time = int(estimated_total_time - elapsed_time)
+                else:
+                    estimated_remaining_time = 0
+                
+                progress_callback({
+                    "progress": progress,
+                    "estimatedTimeRemaining": max(0, estimated_remaining_time)
+                })
+                last_progress_sent = progress
         
         # YOLO detection
         results = model.predict(frame, conf=CONF_THRESHOLD)
