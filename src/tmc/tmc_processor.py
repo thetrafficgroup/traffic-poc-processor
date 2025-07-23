@@ -35,6 +35,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     crossed_lines_by_id = {}
     turn_types_by_id = {}
     crossing_timestamps = {}
+    detected_classes = {}
+    class_counts_by_id = {}
 
     def get_centroid(box):
         x1, y1, x2, y2 = box
@@ -142,10 +144,16 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         if results[0].boxes.id is not None:
             ids = results[0].boxes.id.cpu().numpy()
             boxes = results[0].boxes.xyxy.cpu().numpy()
+            classes = results[0].boxes.cls.cpu().numpy()
 
             for i, box in enumerate(boxes):
                 obj_id = int(ids[i])
+                class_id = int(classes[i])
+                class_name = model.names[class_id]
                 cx, cy = get_centroid(box)
+                
+                # Store class for this object ID
+                class_counts_by_id[obj_id] = class_name
 
                 prev_pos = prev_centroids.get(obj_id)
                 if prev_pos:
@@ -174,8 +182,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 current_time = time.time()
                                 crossed_lines_by_id[obj_id].append(name)
                                 crossing_timestamps[obj_id].append((name, current_time))
+                                
+                                # Count detected class only ONCE per unique object ID
+                                if obj_id not in detected_classes:
+                                    detected_classes[obj_id] = class_name
 
-                            print(f'[✔] ID {obj_id} cruzó {name}')
+                            print(f'[✔] ID {obj_id} ({class_name}) cruzó {name}')
 
                             # Detectar giro cuando haya al menos 2 cruces y no se haya clasificado aún
                             if len(crossing_timestamps[obj_id]) >= 2 and obj_id not in turn_types_by_id:
@@ -184,7 +196,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                     turn_types_by_id[obj_id] = turn_type
                                     from_line = crossing_timestamps[obj_id][0][0]
                                     to_line = crossing_timestamps[obj_id][-1][0]
-                                    print(f'↪ ID {obj_id} hizo un giro {turn_type}: {from_line} -> {to_line}')
+                                    print(f'↪ ID {obj_id} ({class_name}) hizo un giro {turn_type}: {from_line} -> {to_line}')
 
                 prev_centroids[obj_id] = (cx, cy)
         
@@ -271,4 +283,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     id_counts = Counter(all_ids)
     total_count = sum(1 for v in id_counts.values() if v >= 1)
 
-    return {"counts": counts, "turns": Counter(turn_types_by_id.values()), "total": total_count}
+    # Convert detected_classes from {obj_id: class_name} to {class_name: count}
+    class_summary = Counter(detected_classes.values())
+    
+    return {
+        "counts": counts, 
+        "turns": Counter(turn_types_by_id.values()), 
+        "total": total_count,
+        "detected_classes": dict(class_summary)
+    }

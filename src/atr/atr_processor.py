@@ -133,6 +133,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Debug counters
     debug_total_detections = 0
     debug_tracked_objects = set()
+    detected_classes = {}
+    class_counts_by_id = {}
     
     # Initialize video capture
     cap = cv2.VideoCapture(VIDEO_PATH)
@@ -208,9 +210,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         if boxes is not None and len(boxes) > 0:
             for i, box in enumerate(boxes):
                 x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                class_id = int(box.cls[0].cpu().numpy())
+                class_name = model.names[class_id]
                 cx, cy = get_centroid((x1, y1, x2, y2))
                 input_centroids.append(np.array([cx, cy]))
-                detections_map[(cx, cy)] = (x1, y1, x2, y2)
+                detections_map[(cx, cy)] = (x1, y1, x2, y2, class_name)
                 debug_total_detections += 1
         
         # Update tracker
@@ -222,6 +226,15 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             cx, cy = centroid
             pt = Point(cx, cy)
             lane_id = None
+            
+            # Find class for this detection
+            class_name = "unknown"
+            for (det_cx, det_cy), detection_data in detections_map.items():
+                if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
+                    if len(detection_data) > 4:  # Has class_name
+                        class_name = detection_data[4]
+                    break
+            class_counts_by_id[objectID] = class_name
             
             # Find which lane the object is in
             for lid, polygon in lane_polygons:
@@ -251,7 +264,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 if side_prev * side_curr < 0:  # Changed sides
                     counted_ids.add(objectID)
                     lane_counts[lane_id] += 1
-                    print(f"[ATR COUNTED] Vehicle ID={objectID} | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
+                    
+                    # Count detected class only ONCE per unique object ID
+                    if objectID not in detected_classes:
+                        detected_classes[objectID] = class_name
+                    
+                    print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
         
         # Add visualizations if generating output video
         if generate_video_output and video_writer:
@@ -317,8 +335,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     print(f"[ATR DEBUG] Final lane counts: {lane_counts}")
     print(f"[ATR DEBUG] Total count: {total_count}")
     
+    # Convert detected_classes from {obj_id: class_name} to {class_name: count}
+    class_summary = Counter(detected_classes.values())
+    
     return {
         "lane_counts": lane_counts,
         "total_count": total_count,
-        "study_type": "ATR"
+        "study_type": "ATR",
+        "detected_classes": dict(class_summary)
     }
