@@ -286,9 +286,20 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Convert detected_classes from {obj_id: class_name} to {class_name: count}
     class_summary = Counter(detected_classes.values())
     
+    # Calcular turns incluyendo straight
+    turn_counts = Counter(turn_types_by_id.values())
+    turns_dict = dict(turn_counts)
+    
+    # Si no hay straight explícitos, calcularlos como total - left - right - u-turn
+    if 'straight' not in turns_dict:
+        left_count = turns_dict.get('left', 0)
+        right_count = turns_dict.get('right', 0)
+        uturn_count = turns_dict.get('u-turn', 0)
+        turns_dict['straight'] = max(0, total_count - left_count - right_count - uturn_count)
+    
     return {
         "counts": counts, 
-        "turns": Counter(turn_types_by_id.values()), 
+        "turns": turns_dict, 
         "total": total_count,
         "detected_classes": dict(class_summary)
     }
