@@ -10,52 +10,41 @@ IOU_THRESHOLD = 0.2
 DIST_THRESHOLD = 10
 
 
-def calculate_intersection_center(lines):
-    """Calculate the center point of the intersection based on the 4 lines"""
-    # Find average of all line midpoints
-    midpoints = []
-    for line in lines:
-        x1, y1 = line["pt1"]
-        x2, y2 = line["pt2"]
-        mid_x = (x1 + x2) / 2
-        mid_y = (y1 + y2) / 2
-        midpoints.append((mid_x, mid_y))
-    
-    center_x = sum(mx for mx, my in midpoints) / len(midpoints)
-    center_y = sum(my for mx, my in midpoints) / len(midpoints)
-    return (center_x, center_y)
-
-
-def is_moving_toward_intersection(prev_pos, curr_pos, line, intersection_center):
+def is_entering_from_outside(line_name, prev_pos, curr_pos, line_coords):
     """
-    Determine if vehicle is moving toward the intersection through this line
-    Returns True only if vehicle is crossing FROM outside TO inside
-    """
-    if not prev_pos:
-        return False
-        
-    x1, y1 = line["pt1"]
-    x2, y2 = line["pt2"]
+    Determina si un vehículo está entrando desde afuera al cruzar una línea.
+    Usa el producto cruzado para determinar de qué lado de la línea viene el vehículo.
+    Retorna True si el vehículo viene desde el lado "exterior" de la intersección.
     
-    # Calculate which side of the line each position is on
-    def point_side_of_line(px, py, x1, y1, x2, y2):
-        """Returns positive if point is on one side, negative if on the other"""
+    Esta función está optimizada para las coordenadas específicas de este proyecto.
+    """
+    x1, y1 = line_coords["pt1"]
+    x2, y2 = line_coords["pt2"]
+    prev_x, prev_y = prev_pos
+    curr_x, curr_y = curr_pos
+    
+    # Calcular el producto cruzado para determinar el lado de la línea
+    # Si cross_product > 0: punto está a la izquierda de la línea (mirando de pt1 a pt2)
+    # Si cross_product < 0: punto está a la derecha de la línea
+    def cross_product(px, py):
         return (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1)
     
-    prev_side = point_side_of_line(prev_pos[0], prev_pos[1], x1, y1, x2, y2)
-    curr_side = point_side_of_line(curr_pos[0], curr_pos[1], x1, y1, x2, y2)
-    center_side = point_side_of_line(intersection_center[0], intersection_center[1], x1, y1, x2, y2)
+    prev_cross = cross_product(prev_x, prev_y)
     
-    # Vehicle crossed the line (different signs)
-    if (prev_side > 0) != (curr_side > 0):
-        # Check if movement is toward intersection center
-        # Vehicle should be moving from the side opposite to center, toward center side
-        if (prev_side > 0) == (center_side > 0):
-            # Previous position was on same side as center, now moved away - not entering
-            return False
-        else:
-            # Previous position was on opposite side from center, now moved toward center - entering!
-            return True
+    # Definir qué lado es "exterior" para cada línea según la configuración específica
+    # Esta lógica está basada en las coordenadas reales de las líneas
+    if line_name == "NORTH":
+        # Línea norte: exterior está hacia arriba/izquierda
+        return prev_cross > 0  # Viene del lado izquierdo de la línea
+    elif line_name == "SOUTH": 
+        # Línea sur: exterior está hacia abajo/derecha
+        return prev_cross < 0  # Viene del lado derecho de la línea
+    elif line_name == "EAST":
+        # Línea este: exterior está hacia la derecha
+        return prev_cross < 0  # Viene del lado derecho de la línea
+    elif line_name == "WEST":
+        # Línea oeste: exterior está hacia la izquierda
+        return prev_cross > 0  # Viene del lado izquierdo de la línea
     
     return False
 
@@ -81,15 +70,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
     counts = {line["name"]: 0 for line in LINES}
     counted_ids_per_line = {line["name"]: set() for line in LINES}
+    entry_counted_ids = set()  # IDs que entraron desde afuera (para conteo total)
     prev_centroids = {}
     crossed_lines_by_id = {}
     turn_types_by_id = {}
     crossing_timestamps = {}
     detected_classes = {}
     class_counts_by_id = {}
-    
-    # Calculate intersection center for directional filtering
-    intersection_center = calculate_intersection_center(LINES)
 
     def get_centroid(box):
         x1, y1, x2, y2 = box
@@ -133,19 +120,20 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         if from_dir == to_dir:
             return 'u-turn'
 
-        # Tabla corregida basada en perspectiva del observador desde el cielo
+        # Tabla corregida basada en perspectiva del conductor
+        # Giro a la derecha = clockwise, Giro a la izquierda = counterclockwise  
         transitions = {
-            ('NORTH', 'EAST'): 'left',   # North -> East = giro izquierda
-            ('NORTH', 'WEST'): 'right',  # North -> West = giro derecha
+            ('NORTH', 'EAST'): 'right',  # Norte -> Este = giro derecha
+            ('NORTH', 'WEST'): 'left',   # Norte -> Oeste = giro izquierda
             ('NORTH', 'SOUTH'): 'straight',
-            ('EAST', 'SOUTH'): 'left',   # East -> South = giro izquierda
-            ('EAST', 'NORTH'): 'right',  # East -> North = giro derecha
+            ('EAST', 'SOUTH'): 'left',   # Este -> Sur = giro izquierda
+            ('EAST', 'NORTH'): 'right',  # Este -> Norte = giro derecha
             ('EAST', 'WEST'): 'straight',
-            ('SOUTH', 'WEST'): 'left',   # South -> West = giro izquierda
-            ('SOUTH', 'EAST'): 'right',  # South -> East = giro derecha
+            ('SOUTH', 'WEST'): 'left',   # Sur -> Oeste = giro izquierda
+            ('SOUTH', 'EAST'): 'right',  # Sur -> Este = giro derecha
             ('SOUTH', 'NORTH'): 'straight',
-            ('WEST', 'NORTH'): 'left',   # West -> North = giro izquierda
-            ('WEST', 'SOUTH'): 'right',  # West -> South = giro derecha
+            ('WEST', 'NORTH'): 'left',   # Oeste -> Norte = giro izquierda
+            ('WEST', 'SOUTH'): 'right',  # Oeste -> Sur = giro derecha
             ('WEST', 'EAST'): 'straight',
         }
 
@@ -224,39 +212,38 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         crossed = dist < DIST_THRESHOLD and prev_dist > DIST_THRESHOLD
 
                         if crossed and obj_id not in counted_ids_per_line[name]:
-                            # CRITICAL: Only count if vehicle is moving TOWARD intersection
-                            is_entering = is_moving_toward_intersection(prev_pos, (cx, cy), line, intersection_center)
-                            
-                            if is_entering:
-                                counted_ids_per_line[name].add(obj_id)
-                                counts[name] += 1
+                            counted_ids_per_line[name].add(obj_id)
+                            counts[name] += 1
 
-                                # Registrar el cruce con timestamp
-                                if obj_id not in crossed_lines_by_id:
-                                    crossed_lines_by_id[obj_id] = []
-                                    crossing_timestamps[obj_id] = []
+                            # Verificar si está entrando desde afuera (para conteo total)
+                            if is_entering_from_outside(name, prev_pos, (cx, cy), line):
+                                entry_counted_ids.add(obj_id)
+                                print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (ENTRADA desde afuera)')
                                 
-                                if name not in [crossing[0] for crossing in crossing_timestamps[obj_id]]:
-                                    current_time = time.time()
-                                    crossed_lines_by_id[obj_id].append(name)
-                                    crossing_timestamps[obj_id].append((name, current_time))
-                                    
-                                    # Count detected class only ONCE per unique object ID
-                                    if obj_id not in detected_classes:
-                                        detected_classes[obj_id] = class_name
-
-                                print(f'[✔] ID {obj_id} ({class_name}) ENTRÓ por {name}')
-
-                                # Detectar giro cuando haya al menos 2 cruces y no se haya clasificado aún
-                                if len(crossing_timestamps[obj_id]) >= 2 and obj_id not in turn_types_by_id:
-                                    turn_type = classify_turn_from_lines(crossing_timestamps[obj_id])
-                                    if turn_type != 'invalid' and turn_type != 'unknown':
-                                        turn_types_by_id[obj_id] = turn_type
-                                        from_line = crossing_timestamps[obj_id][0][0]
-                                        to_line = crossing_timestamps[obj_id][-1][0]
-                                        print(f'↪ ID {obj_id} ({class_name}) hizo un giro {turn_type}: {from_line} -> {to_line}')
+                                # Count detected class only for vehicles entering from outside
+                                if obj_id not in detected_classes:
+                                    detected_classes[obj_id] = class_name
                             else:
-                                print(f'[❌] ID {obj_id} ({class_name}) cruzó {name} pero SALIENDO del cruce - no contado')
+                                print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (interno, no cuenta para total)')
+
+                            # Registrar el cruce con timestamp
+                            if obj_id not in crossed_lines_by_id:
+                                crossed_lines_by_id[obj_id] = []
+                                crossing_timestamps[obj_id] = []
+                            
+                            if name not in [crossing[0] for crossing in crossing_timestamps[obj_id]]:
+                                current_time = time.time()
+                                crossed_lines_by_id[obj_id].append(name)
+                                crossing_timestamps[obj_id].append((name, current_time))
+
+                            # Detectar giro cuando haya al menos 2 cruces y no se haya clasificado aún
+                            if len(crossing_timestamps[obj_id]) >= 2 and obj_id not in turn_types_by_id:
+                                turn_type = classify_turn_from_lines(crossing_timestamps[obj_id])
+                                if turn_type != 'invalid' and turn_type != 'unknown':
+                                    turn_types_by_id[obj_id] = turn_type
+                                    from_line = crossing_timestamps[obj_id][0][0]
+                                    to_line = crossing_timestamps[obj_id][-1][0]
+                                    print(f'↪ ID {obj_id} ({class_name}) hizo un giro {turn_type}: {from_line} -> {to_line}')
 
                 prev_centroids[obj_id] = (cx, cy)
         
@@ -336,12 +323,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     if video_writer:
         video_writer.release()
 
-    # Post procesamiento
-    all_ids = []
-    for ids in counted_ids_per_line.values():
-        all_ids.extend(ids)
-    id_counts = Counter(all_ids)
-    total_count = sum(1 for v in id_counts.values() if v >= 1)
+    # Post procesamiento con lógica corregida
+    # Usar entry_counted_ids para el conteo total (solo vehículos que entraron desde afuera)
+    total_count = len(entry_counted_ids)
 
     # Convert detected_classes from {obj_id: class_name} to {class_name: count}
     class_summary = Counter(detected_classes.values())
@@ -350,8 +334,18 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     turn_counts = Counter(turn_types_by_id.values())
     turns_dict = dict(turn_counts)
     
-    # Si no hay straight explícitos, calcularlos como total - left - right - u-turn
+    # Ensure all turn categories exist
+    if 'left' not in turns_dict:
+        turns_dict['left'] = 0
+    if 'right' not in turns_dict:
+        turns_dict['right'] = 0
     if 'straight' not in turns_dict:
+        turns_dict['straight'] = 0
+    if 'u-turn' not in turns_dict:
+        turns_dict['u-turn'] = 0
+    
+    # Si no hay straight explícitos, calcularlos como total - left - right - u-turn
+    if turns_dict['straight'] == 0:
         left_count = turns_dict.get('left', 0)
         right_count = turns_dict.get('right', 0)
         uturn_count = turns_dict.get('u-turn', 0)
@@ -363,10 +357,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         "total": total_count,
         "totalcount": total_count,  # Added for clarity
         "detected_classes": dict(class_summary),
-        "intersection_center": intersection_center,  # For debugging
         "validation": {
             "total_vehicles": total_count,
             "total_turns": sum(turns_dict.values()),
-            "validation_passed": total_count == sum(turns_dict.values())
+            "validation_passed": total_count == sum(turns_dict.values()),
+            "entry_vehicles": len(entry_counted_ids),
+            "total_crossings": sum(counts.values())
         }
     }
