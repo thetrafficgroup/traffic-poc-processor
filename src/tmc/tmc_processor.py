@@ -10,6 +10,56 @@ IOU_THRESHOLD = 0.2
 DIST_THRESHOLD = 10
 
 
+def calculate_intersection_center(lines):
+    """Calculate the center point of the intersection based on the 4 lines"""
+    # Find average of all line midpoints
+    midpoints = []
+    for line in lines:
+        x1, y1 = line["pt1"]
+        x2, y2 = line["pt2"]
+        mid_x = (x1 + x2) / 2
+        mid_y = (y1 + y2) / 2
+        midpoints.append((mid_x, mid_y))
+    
+    center_x = sum(mx for mx, my in midpoints) / len(midpoints)
+    center_y = sum(my for mx, my in midpoints) / len(midpoints)
+    return (center_x, center_y)
+
+
+def is_moving_toward_intersection(prev_pos, curr_pos, line, intersection_center):
+    """
+    Determine if vehicle is moving toward the intersection through this line
+    Returns True only if vehicle is crossing FROM outside TO inside
+    """
+    if not prev_pos:
+        return False
+        
+    x1, y1 = line["pt1"]
+    x2, y2 = line["pt2"]
+    
+    # Calculate which side of the line each position is on
+    def point_side_of_line(px, py, x1, y1, x2, y2):
+        """Returns positive if point is on one side, negative if on the other"""
+        return (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1)
+    
+    prev_side = point_side_of_line(prev_pos[0], prev_pos[1], x1, y1, x2, y2)
+    curr_side = point_side_of_line(curr_pos[0], curr_pos[1], x1, y1, x2, y2)
+    center_side = point_side_of_line(intersection_center[0], intersection_center[1], x1, y1, x2, y2)
+    
+    # Vehicle crossed the line (different signs)
+    if (prev_side > 0) != (curr_side > 0):
+        # Check if movement is toward intersection center
+        # Vehicle should be moving from the side opposite to center, toward center side
+        if (prev_side > 0) == (center_side > 0):
+            # Previous position was on same side as center, now moved away - not entering
+            return False
+        else:
+            # Previous position was on opposite side from center, now moved toward center - entering!
+            return True
+    
+    return False
+
+
 def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None):
     model = YOLO(MODEL_PATH)
 
@@ -68,54 +118,6 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         dy = py - yy
         return (dx**2 + dy**2) ** 0.5
     
-    def calculate_intersection_center(lines):
-        """Calculate the center point of the intersection based on the 4 lines"""
-        # Find average of all line midpoints
-        midpoints = []
-        for line in lines:
-            x1, y1 = line["pt1"]
-            x2, y2 = line["pt2"]
-            mid_x = (x1 + x2) / 2
-            mid_y = (y1 + y2) / 2
-            midpoints.append((mid_x, mid_y))
-        
-        center_x = sum(mx for mx, my in midpoints) / len(midpoints)
-        center_y = sum(my for mx, my in midpoints) / len(midpoints)
-        return (center_x, center_y)
-    
-    def is_moving_toward_intersection(prev_pos, curr_pos, line, intersection_center):
-        """
-        Determine if vehicle is moving toward the intersection through this line
-        Returns True only if vehicle is crossing FROM outside TO inside
-        """
-        if not prev_pos:
-            return False
-            
-        x1, y1 = line["pt1"]
-        x2, y2 = line["pt2"]
-        line_name = line["name"]
-        
-        # Calculate which side of the line each position is on
-        def point_side_of_line(px, py, x1, y1, x2, y2):
-            """Returns positive if point is on one side, negative if on the other"""
-            return (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1)
-        
-        prev_side = point_side_of_line(prev_pos[0], prev_pos[1], x1, y1, x2, y2)
-        curr_side = point_side_of_line(curr_pos[0], curr_pos[1], x1, y1, x2, y2)
-        center_side = point_side_of_line(intersection_center[0], intersection_center[1], x1, y1, x2, y2)
-        
-        # Vehicle crossed the line (different signs)
-        if (prev_side > 0) != (curr_side > 0):
-            # Check if movement is toward intersection center
-            # Vehicle should be moving from the side opposite to center, toward center side
-            if (prev_side > 0) == (center_side > 0):
-                # Previous position was on same side as center, now moved away - not entering
-                return False
-            else:
-                # Previous position was on opposite side from center, now moved toward center - entering!
-                return True
-        
-        return False
 
     def classify_turn_from_lines(crossing_data):
         if len(crossing_data) < 2:
