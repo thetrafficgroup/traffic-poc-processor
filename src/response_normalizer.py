@@ -39,6 +39,7 @@ def normalize_tmc_response(result: Dict[str, Any]) -> Dict[str, Any]:
     total = result.get("total", 0)
     detected_classes = result.get("detected_classes", {})
     validation = result.get("validation", {})
+    vehicles = result.get("vehicles", {})  # NEW: Vehicle class analysis
     
     # Ensure all direction counts exist
     direction_counts = {
@@ -80,6 +81,9 @@ def normalize_tmc_response(result: Dict[str, Any]) -> Dict[str, Any]:
         "detected_classes": detected_classes,
         "vehicle_types": detected_classes,  # Alias for consistency
         
+        # NEW: Vehicle class analysis grouped by vehicle type first
+        "vehicles": vehicles,  # Structure: {vehicle_class: {origin: {turn_type: count}}}
+        
         # Lane-based counts (null for TMC)
         "lane_counts": None,
         "lanes": None,
@@ -99,7 +103,8 @@ def normalize_tmc_response(result: Dict[str, Any]) -> Dict[str, Any]:
             "processor": "TMC",
             "has_turn_analysis": True,
             "has_lane_analysis": False,
-            "has_direction_analysis": True
+            "has_direction_analysis": True,
+            "has_vehicle_class_analysis": bool(vehicles)  # Indicate if new analysis is available
         }
     }
 

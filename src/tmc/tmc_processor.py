@@ -10,6 +10,61 @@ IOU_THRESHOLD = 0.2
 DIST_THRESHOLD = 10
 
 
+
+def build_analysis_by_vehicle_class(detected_classes, turn_types_by_id, crossing_timestamps, crossed_lines_by_id):
+    """
+    Build new analysis structure grouped by vehicle class first.
+    Structure: vehicle_class -> origin_direction -> turn_direction -> count
+    """
+    analysis = {}
+    
+    # Initialize totals structure
+    totals = {
+        "NORTH": {"straight": 0, "left": 0, "right": 0, "u-turn": 0},
+        "SOUTH": {"straight": 0, "left": 0, "right": 0, "u-turn": 0},
+        "EAST": {"straight": 0, "left": 0, "right": 0, "u-turn": 0},
+        "WEST": {"straight": 0, "left": 0, "right": 0, "u-turn": 0}
+    }
+    
+    # Group vehicles by class
+    vehicles_by_class = {}
+    for obj_id, vehicle_class in detected_classes.items():
+        if vehicle_class not in vehicles_by_class:
+            vehicles_by_class[vehicle_class] = []
+        vehicles_by_class[vehicle_class].append(obj_id)
+    
+    # For each vehicle class, analyze movements
+    for vehicle_class, vehicle_ids in vehicles_by_class.items():
+        analysis[vehicle_class] = {
+            "NORTH": {"straight": 0, "left": 0, "right": 0, "u-turn": 0},
+            "SOUTH": {"straight": 0, "left": 0, "right": 0, "u-turn": 0},
+            "EAST": {"straight": 0, "left": 0, "right": 0, "u-turn": 0},
+            "WEST": {"straight": 0, "left": 0, "right": 0, "u-turn": 0}
+        }
+        
+        for vehicle_id in vehicle_ids:
+            # Determine origin direction (first line crossed)
+            if vehicle_id in crossing_timestamps and crossing_timestamps[vehicle_id]:
+                origin_direction = crossing_timestamps[vehicle_id][0][0]
+                
+                # Determine turn type
+                if vehicle_id in turn_types_by_id:
+                    turn_type = turn_types_by_id[vehicle_id]
+                else:
+                    # If no turn detected, assume straight
+                    turn_type = "straight"
+                
+                # Increment counters
+                if origin_direction in analysis[vehicle_class] and turn_type in analysis[vehicle_class][origin_direction]:
+                    analysis[vehicle_class][origin_direction][turn_type] += 1
+                    # Also increment totals
+                    totals[origin_direction][turn_type] += 1
+    
+    # Add totals to the analysis
+    analysis["total"] = totals
+    
+    return analysis
+
 def is_entering_from_outside(line_name, prev_pos, curr_pos, line_coords):
     """
     Determina si un vehículo está entrando desde afuera al cruzar una línea.
@@ -351,12 +406,22 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         uturn_count = turns_dict.get('u-turn', 0)
         turns_dict['straight'] = max(0, total_count - left_count - right_count - uturn_count)
     
+    # Build new vehicle-class-first structure
+    vehicles = build_analysis_by_vehicle_class(
+        detected_classes, turn_types_by_id, crossing_timestamps, crossed_lines_by_id
+    )
+    
     return {
+        # Original fields (backward compatibility)
         "counts": counts, 
         "turns": turns_dict, 
         "total": total_count,
         "totalcount": total_count,  # Added for clarity
         "detected_classes": dict(class_summary),
+        
+        # NEW: Analysis grouped by vehicle class first
+        "vehicles": vehicles,
+        
         "validation": {
             "total_vehicles": total_count,
             "total_turns": sum(turns_dict.values()),
