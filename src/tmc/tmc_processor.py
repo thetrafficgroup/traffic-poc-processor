@@ -399,17 +399,25 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     if 'u-turn' not in turns_dict:
         turns_dict['u-turn'] = 0
     
-    # Si no hay straight explícitos, calcularlos como total - left - right - u-turn
+    # Build new vehicle-class-first structure first
+    vehicles = build_analysis_by_vehicle_class(
+        detected_classes, turn_types_by_id, crossing_timestamps, crossed_lines_by_id
+    )
+    
+    # Calculate vehicles with complete movement data (from vehicles analysis)
+    vehicles_with_movement = 0
+    for vehicle_class, origins in vehicles.items():
+        if vehicle_class == 'total':
+            continue
+        for origin_data in origins.values():
+            vehicles_with_movement += sum(origin_data.values())
+    
+    # Si no hay straight explícitos, calcularlos como vehicles_with_movement - left - right - u-turn
     if turns_dict['straight'] == 0:
         left_count = turns_dict.get('left', 0)
         right_count = turns_dict.get('right', 0)
         uturn_count = turns_dict.get('u-turn', 0)
-        turns_dict['straight'] = max(0, total_count - left_count - right_count - uturn_count)
-    
-    # Build new vehicle-class-first structure
-    vehicles = build_analysis_by_vehicle_class(
-        detected_classes, turn_types_by_id, crossing_timestamps, crossed_lines_by_id
-    )
+        turns_dict['straight'] = max(0, vehicles_with_movement - left_count - right_count - uturn_count)
     
     return {
         # Original fields (backward compatibility)
@@ -424,8 +432,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         
         "validation": {
             "total_vehicles": total_count,
+            "vehicles_with_movement": vehicles_with_movement,
             "total_turns": sum(turns_dict.values()),
-            "validation_passed": total_count == sum(turns_dict.values()),
+            "validation_passed": vehicles_with_movement == sum(turns_dict.values()),
             "entry_vehicles": len(entry_counted_ids),
             "total_crossings": sum(counts.values())
         }

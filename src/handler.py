@@ -2,6 +2,7 @@ import os
 import runpod
 from app import process_video
 from utils import download_s3_file, send_sqs_message, upload_s3_file
+from response_normalizer import normalize_response
 
 def handler(event):
     print("🚀 HANDLER STARTED with event:", event)  # DEBUG
@@ -79,11 +80,17 @@ def handler(event):
         os.remove(output_video_path)
         print(f"🗑️ Cleaned up local output video: {output_video_path}")
 
+    # Normalize results before sending to ensure consistent API structure
+    print(f"🔄 Normalizing {study_type} results...")
+    normalized_results = normalize_response(study_type, results)
+    print(f"✅ Results normalized. Original keys: {list(results.keys())}")
+    print(f"✅ Normalized keys: {list(normalized_results.keys())}")
+
     send_sqs_message(queue_url, {
         "videoUuid": video_uuid,
         "status": "completed",
         "video": video_key,
-        "results": results
+        "results": normalized_results
     })
 
     print("✅ Handler completed successfully.")
