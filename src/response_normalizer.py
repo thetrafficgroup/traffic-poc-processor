@@ -18,14 +18,21 @@ def normalize_response(processor_type: str, raw_result: Dict[str, Any]) -> Dict[
         Normalized response with all fields present (null if not applicable)
     """
     
+    # Normalize based on processor type
     if processor_type.upper() == "TMC":
-        return normalize_tmc_response(raw_result)
+        normalized = normalize_tmc_response(raw_result)
     elif processor_type.upper() == "ATR":
-        return normalize_atr_response(raw_result)
+        normalized = normalize_atr_response(raw_result)
     elif processor_type.upper() == "LOW_RATE_ATR" or processor_type.upper() == "LOW-RATE-ATR":
-        return normalize_low_rate_atr_response(raw_result)
+        normalized = normalize_low_rate_atr_response(raw_result)
     else:
         raise ValueError(f"Unknown processor type: {processor_type}")
+    
+    # IMPORTANT: Preserve the videoOutput field if it exists
+    if "videoOutput" in raw_result:
+        normalized["videoOutput"] = raw_result["videoOutput"]
+    
+    return normalized
 
 
 def normalize_tmc_response(result: Dict[str, Any]) -> Dict[str, Any]:

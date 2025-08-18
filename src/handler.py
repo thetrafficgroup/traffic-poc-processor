@@ -82,9 +82,14 @@ def handler(event):
 
     # Normalize results before sending to ensure consistent API structure
     print(f"🔄 Normalizing {study_type} results...")
+    print(f"📋 Original results keys: {list(results.keys())}")
+    print(f"🎬 Original videoOutput: {results.get('videoOutput', 'NOT_FOUND')}")
+    
     normalized_results = normalize_response(study_type, results)
+    
     print(f"✅ Results normalized. Original keys: {list(results.keys())}")
     print(f"✅ Normalized keys: {list(normalized_results.keys())}")
+    print(f"🎬 Normalized videoOutput: {normalized_results.get('videoOutput', 'NOT_FOUND')}")
 
     send_sqs_message(queue_url, {
         "videoUuid": video_uuid,
