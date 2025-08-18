@@ -3,6 +3,15 @@ import json
 import time
 from collections import Counter
 from ultralytics import YOLO
+import numpy as np
+import sys
+import os
+
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from utils.overlap_detection import (
+    soft_nms, detect_occlusions, adjust_confidence_for_occlusion,
+    TrackInterpolator, post_process_detections, analyze_overlap_patterns
+)
 
 CONF_THRESHOLD = 0.01
 IMG_SIZE = 640
@@ -132,6 +141,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     crossing_timestamps = {}
     detected_classes = {}
     class_counts_by_id = {}
+    
+    # Initialize track interpolator for handling occlusions
+    track_interpolator = TrackInterpolator(max_missing_frames=15, min_track_length=3)
+    overlap_stats = {"total_overlaps": 0, "frames_with_overlaps": 0}
 
     def get_centroid(box):
         x1, y1, x2, y2 = box
@@ -242,6 +255,24 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             ids = results[0].boxes.id.cpu().numpy()
             boxes = results[0].boxes.xyxy.cpu().numpy()
             classes = results[0].boxes.cls.cpu().numpy()
+            scores = results[0].boxes.conf.cpu().numpy()
+            
+            # Apply overlap detection improvements
+            processed_boxes, processed_scores, processed_classes, processed_ids = post_process_detections(
+                boxes, scores, classes, ids
+            )
+            
+            # Update overlap statistics
+            if len(processed_boxes) > 1:
+                frame_stats = analyze_overlap_patterns(processed_boxes, processed_ids, {})
+                if frame_stats['overlapping_pairs'] > 0:
+                    overlap_stats["frames_with_overlaps"] += 1
+                    overlap_stats["total_overlaps"] += frame_stats['overlapping_pairs']
+            
+            # Use processed detections for tracking
+            boxes = processed_boxes
+            ids = processed_ids if processed_ids is not None else ids
+            classes = processed_classes
 
             for i, box in enumerate(boxes):
                 obj_id = int(ids[i])
@@ -251,6 +282,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 
                 # Store class for this object ID
                 class_counts_by_id[obj_id] = class_name
+                
+                # Update track interpolator
+                track_interpolator.update_track(obj_id, (cx, cy), current_frame)
 
                 prev_pos = prev_centroids.get(obj_id)
                 if prev_pos:
@@ -301,6 +335,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                     print(f'↪ ID {obj_id} ({class_name}) hizo un giro {turn_type}: {from_line} -> {to_line}')
 
                 prev_centroids[obj_id] = (cx, cy)
+        
+        # Handle missing detections with track interpolation
+        # Clean up old tracks to prevent memory buildup
+        if current_frame % 30 == 0:  # Every 30 frames
+            track_interpolator.cleanup_old_tracks(current_frame, max_age=150)
         
         # Add visualizations if generating output video
         if generate_video_output and video_writer:
@@ -437,5 +476,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             "validation_passed": vehicles_with_movement == sum(turns_dict.values()),
             "entry_vehicles": len(entry_counted_ids),
             "total_crossings": sum(counts.values())
+        },
+        
+        # NEW: Overlap detection statistics
+        "overlap_analysis": {
+            "frames_with_overlaps": overlap_stats["frames_with_overlaps"],
+            "total_overlaps_detected": overlap_stats["total_overlaps"],
+            "overlap_frame_ratio": overlap_stats["frames_with_overlaps"] / max(1, current_frame),
+            "processing_enhancements": {
+                "soft_nms_applied": True,
+                "track_interpolation": True,
+                "confidence_adjustment": True
+            }
         }
     }
