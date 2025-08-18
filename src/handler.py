@@ -1,7 +1,7 @@
 import os
 import runpod
 from app import process_video
-from utils import download_s3_file, send_sqs_message, upload_s3_file
+from aws_utils import download_s3_file, send_sqs_message, upload_s3_file
 from response_normalizer import normalize_response
 
 def handler(event):

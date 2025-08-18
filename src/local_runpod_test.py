@@ -1,7 +1,7 @@
 import os
 import json
 from app import process_video
-from utils import download_s3_file, send_sqs_message
+from aws_utils import download_s3_file, send_sqs_message
 
 import torch
 
