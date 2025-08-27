@@ -25,6 +25,11 @@ def handler(event):
             "progress": progress_data["progress"],
             "estimatedTimeRemaining": progress_data["estimatedTimeRemaining"]
         })
+    
+    def minute_batch_callback(batch_data):
+        """Callback to send minute batch data via SQS"""
+        print(f"📦 Sending minute batch via SQS: {batch_data.get('batchId', 'unknown')}")
+        send_sqs_message(queue_url, batch_data)
 
     # Generate output video path if requested
     output_video_path = None
@@ -42,6 +47,7 @@ def handler(event):
         model_path, 
         study_type, 
         progress_callback,
+        minute_batch_callback=minute_batch_callback,
         generate_video_output=generate_video_output,
         output_video_path=output_video_path
     )
@@ -91,12 +97,21 @@ def handler(event):
     print(f"✅ Normalized keys: {list(normalized_results.keys())}")
     print(f"🎬 Normalized videoOutput: {normalized_results.get('videoOutput', 'NOT_FOUND')}")
 
-    send_sqs_message(queue_url, {
+    # Prepare completion message with duration if available
+    completion_message = {
         "videoUuid": video_uuid,
         "status": "completed",
         "video": video_key,
         "results": normalized_results
-    })
+    }
+    
+    # Include video duration from processing results if available
+    video_metadata = results.get("video_metadata", {})
+    if video_metadata.get("duration_seconds"):
+        completion_message["durationSeconds"] = video_metadata["duration_seconds"]
+        print(f"📊 Including video duration in completion message: {video_metadata['duration_seconds']} seconds")
+    
+    send_sqs_message(queue_url, completion_message)
 
     print("✅ Handler completed successfully.")
 

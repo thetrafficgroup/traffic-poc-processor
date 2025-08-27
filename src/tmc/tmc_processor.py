@@ -12,6 +12,7 @@ from utils.overlap_detection import (
     soft_nms, detect_occlusions, adjust_confidence_for_occlusion,
     TrackInterpolator, post_process_detections, analyze_overlap_patterns
 )
+from utils.minute_tracker import MinuteTracker
 
 CONF_THRESHOLD = 0.01
 IMG_SIZE = 640
@@ -113,7 +114,7 @@ def is_entering_from_outside(line_name, prev_pos, curr_pos, line_coords):
     return False
 
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, minute_batch_callback=None, generate_video_output=False, output_video_path=None):
     model = YOLO(MODEL_PATH)
 
     raw_lines = LINES_DATA
@@ -145,6 +146,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Initialize track interpolator for handling occlusions
     track_interpolator = TrackInterpolator(max_missing_frames=15, min_track_length=3)
     overlap_stats = {"total_overlaps": 0, "frames_with_overlaps": 0}
+    
+    # Initialize minute tracking state
+    previous_counts = {line["name"]: 0 for line in LINES}
+    previous_entry_ids = set()
+    previous_turn_ids = set()
 
     def get_centroid(box):
         x1, y1, x2, y2 = box
@@ -209,14 +215,24 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
     cap = cv2.VideoCapture(VIDEO_PATH)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
     current_frame = 0
     start_time = time.time()
     last_progress_sent = -1
     
+    # Initialize minute tracker if callback provided
+    minute_tracker = None
+    if minute_batch_callback:
+        # Generate video UUID for minute tracking (use filename as fallback)
+        import uuid
+        video_filename = os.path.basename(VIDEO_PATH)
+        video_uuid = str(uuid.uuid5(uuid.NAMESPACE_DNS, video_filename))
+        minute_tracker = MinuteTracker(fps, video_uuid, minute_batch_callback)
+        print(f"📊 Minute tracking enabled for video {video_uuid}")
+    
     # Initialize video writer if output video is requested  
     video_writer = None
     if generate_video_output and output_video_path:
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
@@ -227,7 +243,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         for codec in codecs_to_try:
             try:
                 fourcc = cv2.VideoWriter_fourcc(*codec)
-                temp_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+                temp_writer = cv2.VideoWriter(output_video_path, fourcc, int(fps), (width, height))
                 if temp_writer.isOpened():
                     video_writer = temp_writer
                     print(f"✅ Using video codec: {codec}")
@@ -393,6 +409,31 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             # Write frame to output video
             video_writer.write(frame)
         
+        # Update minute tracker with current frame detection data
+        if minute_tracker:
+            # Calculate new vehicles entered in this frame (vehicles that crossed for the first time)
+            current_new_vehicles = len(entry_counted_ids) - len(previous_entry_ids)
+            previous_entry_ids = entry_counted_ids.copy()
+            
+            # Build detection data for this frame
+            frame_detections = {
+                "direction_counts": {name: count - previous_counts.get(name, 0) for name, count in counts.items()},
+                "class_counts": {class_name: sum(1 for class_id, cls in detected_classes.items() 
+                                               if cls == class_name and class_id in entry_counted_ids) 
+                                for class_name in set(detected_classes.values())},
+                "turn_counts": {turn_type: sum(1 for turn_id, turn in turn_types_by_id.items() 
+                                             if turn == turn_type and turn_id not in previous_turn_ids) 
+                               for turn_type in ["left", "right", "straight", "u-turn"]},
+                "new_vehicles": current_new_vehicles
+            }
+            
+            # Update previous state for next frame
+            previous_counts = counts.copy()
+            previous_turn_ids = set(turn_types_by_id.keys())
+            
+            # Send frame data to minute tracker
+            minute_tracker.update_frame_data(current_frame, frame_detections)
+        
         # Progress tracking
         current_frame += 1
         if progress_callback and total_frames > 0:
@@ -458,6 +499,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         uturn_count = turns_dict.get('u-turn', 0)
         turns_dict['straight'] = max(0, vehicles_with_movement - left_count - right_count - uturn_count)
     
+    # Finalize minute tracking if enabled
+    video_duration_seconds = None
+    if minute_tracker:
+        video_duration_seconds = minute_tracker.finalize_processing()
+        print(f"📊 Video duration calculated: {video_duration_seconds} seconds")
+    
     return {
         # Original fields (backward compatibility)
         "counts": counts, 
@@ -488,5 +535,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 "track_interpolation": True,
                 "confidence_adjustment": True
             }
+        },
+        
+        # Video metadata
+        "video_metadata": {
+            "duration_seconds": video_duration_seconds,
+            "total_frames": current_frame,
+            "fps": fps
         }
     }
