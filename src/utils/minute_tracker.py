@@ -5,13 +5,13 @@ Handles minute-by-minute data collection and batch processing for SQS.
 
 import json
 import uuid
-from typing import Dict, List, Optional, Callable, Any
+from typing import Dict, List, Optional, Callable, Any, Set
 
 
 class MinuteTracker:
     """
     Tracks vehicle detections and movements on a per-minute basis.
-    Manages batching and SQS message preparation.
+    Manages batching and SQS message preparation with proper vehicle-direction-turn nesting.
     """
     
     def __init__(self, fps: float, video_uuid: str, batch_callback: Optional[Callable] = None):
@@ -26,7 +26,9 @@ class MinuteTracker:
         
         # Batch configuration
         self.BATCH_SIZE = 5  # Send batch every 5 minutes
-        self.pending_batches: List[Dict] = []
+        
+        # Track processed vehicle IDs per minute to avoid duplicates
+        self.processed_vehicles_per_minute: Dict[int, Set[int]] = {}
         
         print(f"🔄 MinuteTracker initialized for video {video_uuid} with FPS={fps}")
     
@@ -35,13 +37,17 @@ class MinuteTracker:
         seconds = frame_number / self.fps
         return int(seconds / 60)
     
-    def update_frame_data(self, frame_number: int, detections: Dict[str, Any]) -> None:
+    def process_vehicle_detection(self, frame_number: int, vehicle_id: int, vehicle_class: str, 
+                                 origin_direction: str, turn_type: str) -> None:
         """
-        Update minute data with detection results from current frame.
+        Process a single vehicle detection with its complete movement data.
         
         Args:
             frame_number: Current frame number
-            detections: Dictionary containing detection data for this frame
+            vehicle_id: Unique vehicle ID
+            vehicle_class: Vehicle classification (car, bus, etc.)
+            origin_direction: Direction vehicle came from (NORTH, SOUTH, EAST, WEST)
+            turn_type: Turn type (left, right, straight, u-turn)
         """
         video_minute = self.calculate_minute_from_frame(frame_number)
         
@@ -56,39 +62,51 @@ class MinuteTracker:
             # Check if we should send a batch
             self._check_and_send_batch()
         
-        # Initialize minute data if not exists
+        # Initialize minute tracking if not exists
+        if video_minute not in self.processed_vehicles_per_minute:
+            self.processed_vehicles_per_minute[video_minute] = set()
+        
+        # Skip if vehicle already processed this minute
+        if vehicle_id in self.processed_vehicles_per_minute[video_minute]:
+            return
+        
+        # Mark vehicle as processed for this minute
+        self.processed_vehicles_per_minute[video_minute].add(vehicle_id)
+        
+        # Initialize minute data structure if not exists
         if video_minute not in self.minute_data:
             self.minute_data[video_minute] = {
-                "counts": {},
-                "vehicles_by_class": {},
-                "turn_summary": {"left": 0, "right": 0, "straight": 0, "u-turn": 0},
-                "directions": {"NORTH": 0, "SOUTH": 0, "EAST": 0, "WEST": 0},
-                "total_vehicles": 0,
+                "vehicles": {},
                 "frame_range": {"start": frame_number, "end": frame_number}
             }
         
         # Update frame range
         self.minute_data[video_minute]["frame_range"]["end"] = frame_number
         
-        # Accumulate detection data
-        minute_data = self.minute_data[video_minute]
+        # Initialize nested structure for vehicle class if not exists
+        vehicles = self.minute_data[video_minute]["vehicles"]
+        if vehicle_class not in vehicles:
+            vehicles[vehicle_class] = self._create_empty_direction_structure()
         
-        # Update counts by direction
-        for direction, count in detections.get("direction_counts", {}).items():
-            if direction in minute_data["directions"]:
-                minute_data["directions"][direction] = minute_data["directions"].get(direction, 0) + count
+        # Update the count
+        if origin_direction in vehicles[vehicle_class] and turn_type in vehicles[vehicle_class][origin_direction]:
+            vehicles[vehicle_class][origin_direction][turn_type] += 1
         
-        # Update vehicle class counts
-        for vehicle_class, count in detections.get("class_counts", {}).items():
-            minute_data["vehicles_by_class"][vehicle_class] = minute_data["vehicles_by_class"].get(vehicle_class, 0) + count
+        # Update totals
+        if "total" not in vehicles:
+            vehicles["total"] = self._create_empty_direction_structure()
         
-        # Update turn counts
-        for turn_type, count in detections.get("turn_counts", {}).items():
-            if turn_type in minute_data["turn_summary"]:
-                minute_data["turn_summary"][turn_type] += count
-        
-        # Update total vehicles
-        minute_data["total_vehicles"] += detections.get("new_vehicles", 0)
+        if origin_direction in vehicles["total"] and turn_type in vehicles["total"][origin_direction]:
+            vehicles["total"][origin_direction][turn_type] += 1
+    
+    def _create_empty_direction_structure(self) -> Dict[str, Dict[str, int]]:
+        """Create empty nested structure for directions and turns."""
+        return {
+            "NORTH": {"left": 0, "right": 0, "straight": 0, "u-turn": 0},
+            "SOUTH": {"left": 0, "right": 0, "straight": 0, "u-turn": 0},
+            "EAST": {"left": 0, "right": 0, "straight": 0, "u-turn": 0},
+            "WEST": {"left": 0, "right": 0, "straight": 0, "u-turn": 0}
+        }
     
     def _finalize_minute(self, minute_number: int) -> None:
         """
@@ -100,15 +118,19 @@ class MinuteTracker:
         if minute_number not in self.minute_data:
             # Create empty minute data if no detections occurred
             self.minute_data[minute_number] = {
-                "counts": {},
-                "vehicles_by_class": {},
-                "turn_summary": {"left": 0, "right": 0, "straight": 0, "u-turn": 0},
-                "directions": {"NORTH": 0, "SOUTH": 0, "EAST": 0, "WEST": 0},
-                "total_vehicles": 0,
+                "vehicles": {
+                    "total": self._create_empty_direction_structure()
+                },
                 "frame_range": {"start": 0, "end": 0}
             }
         
-        print(f"📊 Minute {minute_number} finalized: {self.minute_data[minute_number]['total_vehicles']} vehicles")
+        # Clear processed vehicles for this minute to free memory
+        if minute_number in self.processed_vehicles_per_minute:
+            vehicle_count = len(self.processed_vehicles_per_minute[minute_number])
+            del self.processed_vehicles_per_minute[minute_number]
+            print(f"📊 Minute {minute_number} finalized: {vehicle_count} unique vehicles processed")
+        else:
+            print(f"📊 Minute {minute_number} finalized: 0 vehicles processed")
     
     def _check_and_send_batch(self) -> None:
         """Check if we should send a batch and send it if ready."""

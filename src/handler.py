@@ -45,8 +45,9 @@ def handler(event):
         video_path, 
         lines_data, 
         model_path, 
-        study_type, 
-        progress_callback,
+        study_type,
+        video_uuid=video_uuid,
+        progress_callback=progress_callback,
         minute_batch_callback=minute_batch_callback,
         generate_video_output=generate_video_output,
         output_video_path=output_video_path
