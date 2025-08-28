@@ -146,6 +146,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # Initialize track interpolator for handling occlusions
     track_interpolator = TrackInterpolator(max_missing_frames=15, min_track_length=3)
     overlap_stats = {"total_overlaps": 0, "frames_with_overlaps": 0}
+    
+    # Track vehicles that have been processed by minute tracker
+    minute_processed_vehicles = set()
 
     def get_centroid(box):
         x1, y1, x2, y2 = box
@@ -417,23 +420,27 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                 if vehicle_id in crossing_timestamps and len(crossing_timestamps[vehicle_id]) >= 2:
                     # Only process vehicles that entered from outside (to match final results)
                     if vehicle_id in entry_counted_ids:
-                        # Get vehicle class (use detected_classes for consistency with final results)
-                        vehicle_class = detected_classes.get(vehicle_id, 'unknown')
-                        
-                        # Get origin direction (first line crossed)
-                        origin_direction = crossing_timestamps[vehicle_id][0][0].upper()
-                        
-                        # Get turn type
-                        turn_type = turn_types_by_id[vehicle_id]
-                        
-                        # Process this vehicle detection
-                        minute_tracker.process_vehicle_detection(
-                            current_frame,
-                            vehicle_id,
-                            vehicle_class,
-                            origin_direction,
-                            turn_type
-                        )
+                        # Only process each vehicle once for minute tracking
+                        if vehicle_id not in minute_processed_vehicles:
+                            minute_processed_vehicles.add(vehicle_id)
+                            
+                            # Get vehicle class (use detected_classes for consistency with final results)
+                            vehicle_class = detected_classes.get(vehicle_id, 'unknown')
+                            
+                            # Get origin direction (first line crossed)
+                            origin_direction = crossing_timestamps[vehicle_id][0][0].upper()
+                            
+                            # Get turn type
+                            turn_type = turn_types_by_id[vehicle_id]
+                            
+                            # Process this vehicle detection
+                            minute_tracker.process_vehicle_detection(
+                                current_frame,
+                                vehicle_id,
+                                vehicle_class,
+                                origin_direction,
+                                turn_type
+                            )
         
         # Progress tracking
         current_frame += 1
