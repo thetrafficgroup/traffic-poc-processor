@@ -25,6 +25,6 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", study_type="TMC"
                                 minute_batch_callback, generate_video_output, output_video_path)
     elif study_type.upper() == "ATR":
         return atr_process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH, progress_callback,
-                                generate_video_output, output_video_path)
+                                generate_video_output, output_video_path, video_uuid, minute_batch_callback)
     else:
         raise ValueError(f"Unknown study_type: {study_type}. Must be 'TMC' or 'ATR'")

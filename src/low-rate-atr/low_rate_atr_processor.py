@@ -6,6 +6,11 @@ import time
 from collections import Counter
 from shapely.geometry import Point, Polygon
 from ultralytics import YOLO
+import sys
+import os
+# Add parent directory to path to access atr module
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from atr.atr_minute_tracker import ATRMinuteTracker
 
 
 def generate_parallel_lines(finish_line, distance=30):
@@ -51,7 +56,7 @@ def generate_parallel_lines(finish_line, distance=30):
     
     return line_a, line_b
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None, detection_distance=30):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None, detection_distance=30, video_uuid=None, minute_batch_callback=None):
     """
     Process low frame rate ATR video using zone-based detection.
     
@@ -63,6 +68,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         generate_video_output: Whether to generate output video
         output_video_path: Path for output video
         detection_distance: Distance in pixels for parallel lines generation (default 30)
+        video_uuid: UUID of the video being processed (optional, for minute tracking)
+        minute_batch_callback: Optional callback for minute-by-minute batch data
         
     Returns:
         Dictionary with lane counts and total count
@@ -165,9 +172,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Video processing
     cap = cv2.VideoCapture(VIDEO_PATH)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
     frame_count = 0
     last_progress_sent = -1
     start_time = time.time()
+    
+    # Initialize minute tracker if callback provided
+    minute_tracker = None
+    if video_uuid and minute_batch_callback:
+        # Set verbose=False in production for better performance
+        minute_tracker = ATRMinuteTracker(fps, video_uuid, minute_batch_callback, verbose=False)
+        print(f"🔄 Low-Rate ATR MinuteTracker enabled for video {video_uuid}")
     
     # Initialize video writer if requested
     video_writer = None
@@ -325,6 +340,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         if obj["id"] not in detected_classes:
                             detected_classes[obj["id"]] = obj["label"]
                         
+                        # Track in minute tracker if enabled
+                        if minute_tracker:
+                            minute_tracker.process_vehicle_detection(frame_count, obj["id"], obj["label"], lane_id)
+                        
                         print(f"[LOW-RATE-ATR COUNTED] Vehicle ID={obj['id']} ({obj['label']}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
         
         # Visualization if generating output video
@@ -387,6 +406,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     cap.release()
     if video_writer:
         video_writer.release()
+    
+    # Finalize minute tracking if enabled
+    total_duration = None
+    if minute_tracker:
+        total_duration = minute_tracker.finalize_processing()
     
     # Calculate final results
     total_count = sum(lane_counts.values())

@@ -5,6 +5,7 @@ import time
 from shapely.geometry import Point, Polygon
 from ultralytics import YOLO
 from collections import OrderedDict, Counter
+from .atr_minute_tracker import ATRMinuteTracker
 
 # === Centroid Tracker ===
 class CentroidTracker:
@@ -93,7 +94,7 @@ def point_side_of_line(p, a, b):
     # Ensure all coordinates are numeric (handle potential float/int mix)
     return (float(b[0]) - float(a[0])) * (float(p[1]) - float(a[1])) - (float(b[1]) - float(a[1])) * (float(p[0]) - float(a[0]))
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None, video_uuid=None, minute_batch_callback=None):
     """
     Process video for ATR (Automatic Traffic Recording) analysis.
     
@@ -102,6 +103,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         LINES_DATA: Lane configuration data with lanes and finish_line
         MODEL_PATH: Path to YOLO model
         progress_callback: Optional callback for progress updates
+        generate_video_output: Whether to generate annotated output video
+        output_video_path: Path for output video (if generate_video_output=True)
+        video_uuid: UUID of the video being processed (optional, for minute tracking)
+        minute_batch_callback: Optional callback for minute-by-minute batch data
         
     Returns:
         Dictionary with lane counts and total count
@@ -139,9 +144,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Initialize video capture
     cap = cv2.VideoCapture(VIDEO_PATH)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
     frame_count = 0
     last_progress_sent = -1
     start_time = time.time()
+    
+    # Initialize minute tracker if callback provided
+    minute_tracker = None
+    if video_uuid and minute_batch_callback:
+        # Set verbose=False in production for better performance
+        minute_tracker = ATRMinuteTracker(fps, video_uuid, minute_batch_callback, verbose=False)
+        print(f"🔄 ATR MinuteTracker enabled for video {video_uuid}")
     
     # Initialize video writer if output video is requested
     video_writer = None
@@ -269,6 +282,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     if objectID not in detected_classes:
                         detected_classes[objectID] = class_name
                     
+                    # Track in minute tracker if enabled
+                    if minute_tracker:
+                        minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
+                    
                     print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
         
         # Add visualizations if generating output video
@@ -324,6 +341,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     cap.release()
     if video_writer:
         video_writer.release()
+    
+    # Finalize minute tracking if enabled
+    total_duration = None
+    if minute_tracker:
+        total_duration = minute_tracker.finalize_processing()
     
     # Return results
     total_count = sum(lane_counts.values())
