@@ -125,6 +125,7 @@ def normalize_atr_response(result: Dict[str, Any]) -> Dict[str, Any]:
     lane_counts = result.get("lane_counts", {})
     total_count = result.get("total_count", 0)
     detected_classes = result.get("detected_classes", {})
+    vehicles = result.get("vehicles", {})  # NEW: Standardized vehicle class data
     
     # Convert lane counts to list format for better structure
     lanes = []
@@ -163,6 +164,9 @@ def normalize_atr_response(result: Dict[str, Any]) -> Dict[str, Any]:
         "detected_classes": detected_classes,
         "vehicle_types": detected_classes,  # Alias for consistency
         
+        # NEW: Standardized vehicle class analysis grouped by vehicle type first
+        "vehicles": vehicles,  # Structure: {vehicle_class: {lane_id: count}}
+        
         # Validation data
         "validation": {
             "total_vehicles": total_count,
@@ -177,7 +181,8 @@ def normalize_atr_response(result: Dict[str, Any]) -> Dict[str, Any]:
             "processor": "ATR",
             "has_turn_analysis": False,
             "has_lane_analysis": True,
-            "has_direction_analysis": False
+            "has_direction_analysis": False,
+            "has_vehicle_class_analysis": bool(vehicles)  # Indicate if standardized analysis is available
         }
     }
 
