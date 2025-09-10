@@ -239,23 +239,51 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        # Try multiple codecs for web compatibility
-        codecs_to_try = ['H264', 'X264', 'XVID', 'mp4v']
-        video_writer = None
+        # Aggressive compression settings for TMC processor
+        # Use H.264 with high compression for minimal file size
+        try:
+            fourcc = cv2.VideoWriter_fourcc(*'H264')
+            # Reduce output resolution if too large for better compression
+            if width > 1920 or height > 1080:
+                scale_factor = min(1920/width, 1080/height)
+                width = int(width * scale_factor)
+                height = int(height * scale_factor)
+                print(f"📉 Scaling output resolution to {width}x{height} for compression")
+            
+            # Use lower FPS for additional compression if original is high
+            output_fps = min(fps, 15)  # Cap at 15 FPS for traffic analysis
+            if output_fps != fps:
+                print(f"📉 Reducing output FPS from {fps} to {output_fps} for compression")
+            
+            video_writer = cv2.VideoWriter(output_video_path, fourcc, output_fps, (width, height))
+            
+            if video_writer.isOpened():
+                print(f"✅ TMC video writer initialized: H264 codec, {width}x{height}@{output_fps}fps")
+            else:
+                video_writer.release()
+                video_writer = None
+                
+        except Exception as e:
+            print(f"⚠️ H264 codec failed: {e}")
+            video_writer = None
         
-        for codec in codecs_to_try:
-            try:
-                fourcc = cv2.VideoWriter_fourcc(*codec)
-                temp_writer = cv2.VideoWriter(output_video_path, fourcc, int(fps), (width, height))
-                if temp_writer.isOpened():
-                    video_writer = temp_writer
-                    print(f"✅ Using video codec: {codec}")
-                    break
-                else:
-                    temp_writer.release()
-            except Exception as e:
-                print(f"⚠️ Codec {codec} failed: {e}")
-                continue
+        # Fallback to other codecs if H264 fails
+        if not video_writer:
+            codecs_to_try = ['X264', 'XVID', 'mp4v']
+            
+            for codec in codecs_to_try:
+                try:
+                    fourcc = cv2.VideoWriter_fourcc(*codec)
+                    temp_writer = cv2.VideoWriter(output_video_path, fourcc, int(fps), (width, height))
+                    if temp_writer.isOpened():
+                        video_writer = temp_writer
+                        print(f"✅ Fallback to video codec: {codec}")
+                        break
+                    else:
+                        temp_writer.release()
+                except Exception as e:
+                    print(f"⚠️ Codec {codec} failed: {e}")
+                    continue
         
         if not video_writer:
             print("❌ Could not initialize video writer with any codec")
@@ -408,6 +436,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                 y_pos += 25
                 cv2.putText(frame, f'{turn_type}: {count}', (20, y_pos),
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+            
+            # Resize frame if needed for compression
+            if width != int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or height != int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)):
+                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
             
             # Write frame to output video
             video_writer.write(frame)

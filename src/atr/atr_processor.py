@@ -194,30 +194,60 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Initialize video writer if output video is requested
     video_writer = None
     if generate_video_output and output_video_path:
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        orig_fps = int(cap.get(cv2.CAP_PROP_FPS))
+        orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         
-        # Try multiple codecs for web compatibility
-        codecs_to_try = ['H264', 'X264', 'XVID', 'mp4v']
-        video_writer = None
+        # Aggressive compression settings for ATR processor
+        # Use H.264 with high compression for minimal file size
+        width, height = orig_width, orig_height
         
-        for codec in codecs_to_try:
-            try:
-                fourcc = cv2.VideoWriter_fourcc(*codec)
-                temp_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
-                if temp_writer.isOpened():
-                    video_writer = temp_writer
-                    print(f"✅ Using video codec: {codec}")
-                    break
-                else:
-                    temp_writer.release()
-            except Exception as e:
-                print(f"⚠️ Codec {codec} failed: {e}")
-                continue
+        try:
+            fourcc = cv2.VideoWriter_fourcc(*'H264')
+            # Reduce output resolution if too large for better compression
+            if width > 1920 or height > 1080:
+                scale_factor = min(1920/width, 1080/height)
+                width = int(width * scale_factor)
+                height = int(height * scale_factor)
+                print(f"📉 Scaling ATR output resolution to {width}x{height} for compression")
+            
+            # Use lower FPS for additional compression if original is high
+            output_fps = min(orig_fps, 15)  # Cap at 15 FPS for traffic analysis
+            if output_fps != orig_fps:
+                print(f"📉 Reducing ATR output FPS from {orig_fps} to {output_fps} for compression")
+            
+            video_writer = cv2.VideoWriter(output_video_path, fourcc, output_fps, (width, height))
+            
+            if video_writer.isOpened():
+                print(f"✅ ATR video writer initialized: H264 codec, {width}x{height}@{output_fps}fps")
+            else:
+                video_writer.release()
+                video_writer = None
+                
+        except Exception as e:
+            print(f"⚠️ H264 codec failed: {e}")
+            video_writer = None
+        
+        # Fallback to other codecs if H264 fails
+        if not video_writer:
+            codecs_to_try = ['X264', 'XVID', 'mp4v']
+            
+            for codec in codecs_to_try:
+                try:
+                    fourcc = cv2.VideoWriter_fourcc(*codec)
+                    temp_writer = cv2.VideoWriter(output_video_path, fourcc, orig_fps, (width, height))
+                    if temp_writer.isOpened():
+                        video_writer = temp_writer
+                        print(f"✅ Fallback to ATR video codec: {codec}")
+                        break
+                    else:
+                        temp_writer.release()
+                except Exception as e:
+                    print(f"⚠️ Codec {codec} failed: {e}")
+                    continue
         
         if not video_writer:
-            print("❌ Could not initialize video writer with any codec")
+            print("❌ Could not initialize ATR video writer with any codec")
             generate_video_output = False
     
     # Process video frames
@@ -370,6 +400,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             total_count_current = sum(lane_counts.values())
             cv2.putText(frame, f'Total: {total_count_current}', (20, 40), 
                        cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 255), 3)
+            
+            # Resize frame if needed for compression
+            if width != orig_width or height != orig_height:
+                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
             
             # Write frame to output video
             video_writer.write(frame)
