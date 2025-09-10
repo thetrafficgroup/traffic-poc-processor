@@ -154,9 +154,9 @@ def handler(event):
                     '-c:v:2', 'libx264', '-c:a:2', 'aac',
                     '-b:v:2', '600k', '-b:a:2', '64k',
                     '-s:v:2', '640x360', '-profile:v:2', 'baseline',
-                    # HLS settings
+                    # HLS settings - 1 hour chunks for traffic analysis
                     '-f', 'hls',
-                    '-hls_time', '10',
+                    '-hls_time', '3600',  # 1 hour chunks (3600 seconds)
                     '-hls_playlist_type', 'vod',
                     '-hls_segment_filename', os.path.join(hls_folder, 'segment_%v_%03d.ts'),
                     '-master_pl_name', 'master.m3u8',
