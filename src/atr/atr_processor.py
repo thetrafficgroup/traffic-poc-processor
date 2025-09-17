@@ -72,6 +72,34 @@ def get_centroid(box):
     x1, y1, x2, y2 = box
     return int((x1 + x2) / 2), int((y1 + y2) / 2)
 
+def get_wheels_position(box):
+    """Get the wheel position (bottom center) of the bounding box"""
+    x1, y1, x2, y2 = box
+    # Wheels are at the bottom center of the vehicle
+    return int((x1 + x2) / 2), int(y2)
+
+def find_vehicle_lane(centroid_x, centroid_y, wheels_x, wheels_y, lane_polygons_buffered):
+    """
+    Find vehicle lane using wheels-priority approach.
+    First checks wheel position, falls back to centroid if no match.
+    
+    Returns:
+        lane_id or None
+    """
+    # Priority 1: Check wheels position
+    wheels_point = Point(wheels_x, wheels_y)
+    for lane_id, buffered_polygon in lane_polygons_buffered:
+        if buffered_polygon.contains(wheels_point):
+            return lane_id
+    
+    # Priority 2: Fallback to centroid
+    centroid_point = Point(centroid_x, centroid_y)
+    for lane_id, buffered_polygon in lane_polygons_buffered:
+        if buffered_polygon.contains(centroid_point):
+            return lane_id
+    
+    return None
+
 def dict_points_to_tuples(points):
     """Convert points from dict format to tuples, ensuring they are integers for OpenCV"""
     result = []
@@ -156,6 +184,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         lane["points"] = dict_points_to_tuples(lane["points"])
     lane_polygons = [(lane["id"], Polygon(lane["points"])) for lane in lanes]
     lane_counts = {lane_id: 0 for lane_id, _ in lane_polygons}
+    # Cache buffered polygons for performance optimization
+    lane_polygons_buffered = [(lane_id, polygon.buffer(8)) for lane_id, polygon in lane_polygons]
     
     # Process finish line
     finish_line = LINES_DATA.get("finish_line")
@@ -291,8 +321,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 class_id = int(box.cls[0].cpu().numpy())
                 class_name = model.names[class_id]
                 cx, cy = get_centroid((x1, y1, x2, y2))
+                wx, wy = get_wheels_position((x1, y1, x2, y2))
                 input_centroids.append(np.array([cx, cy]))
-                detections_map[(cx, cy)] = (x1, y1, x2, y2, class_name)
+                detections_map[(cx, cy)] = (x1, y1, x2, y2, class_name, wx, wy)
                 debug_total_detections += 1
         
         # Update tracker
@@ -314,11 +345,24 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     break
             class_counts_by_id[objectID] = class_name
             
-            # Find which lane the object is in
-            for lid, polygon in lane_polygons:
-                if polygon.buffer(8).contains(pt):
-                    lane_id = lid
+            # Find which lane the object is in using wheels-priority approach
+            wheels_x, wheels_y = None, None
+            # Extract wheels position from detection data if available
+            for (det_cx, det_cy), detection_data in detections_map.items():
+                if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
+                    if len(detection_data) > 6:  # Has wheels coordinates
+                        wheels_x, wheels_y = detection_data[5], detection_data[6]
                     break
+            
+            # Use wheels-priority detection if wheels data available
+            if wheels_x is not None and wheels_y is not None:
+                lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered)
+            else:
+                # Fallback to original centroid-only method for compatibility
+                for lid, buffered_polygon in lane_polygons_buffered:
+                    if buffered_polygon.contains(pt):
+                        lane_id = lid
+                        break
             
             # Initialize position history
             if objectID not in previous_positions:
@@ -363,18 +407,35 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             for objectID, centroid in objects.items():
                 cx, cy = int(centroid[0]), int(centroid[1])
                 
-                # Find lane for this object
+                # Find lane for this object using wheels-priority approach
                 pt = Point(cx, cy)
                 lane_id = None
-                for lid, polygon in lane_polygons:
-                    if polygon.buffer(8).contains(pt):
-                        lane_id = lid
+                # Try to get wheels position from detections_map
+                wheels_x, wheels_y = None, None
+                for (det_cx, det_cy), detection_data in detections_map.items():
+                    if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
+                        if len(detection_data) > 6:
+                            wheels_x, wheels_y = detection_data[5], detection_data[6]
                         break
+                
+                if wheels_x is not None and wheels_y is not None:
+                    lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered)
+                else:
+                    for lid, buffered_polygon in lane_polygons_buffered:
+                        if buffered_polygon.contains(pt):
+                            lane_id = lid
+                            break
                 
                 # Draw bounding box if available
                 if (cx, cy) in detections_map:
-                    x1, y1, x2, y2, class_name_viz = detections_map[(cx, cy)]
+                    detection_data = detections_map[(cx, cy)]
+                    x1, y1, x2, y2, class_name_viz = detection_data[:5]
                     cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+                    
+                    # Draw wheels position if available (for debugging)
+                    if len(detection_data) > 6:
+                        wx, wy = detection_data[5], detection_data[6]
+                        cv2.circle(frame, (int(wx), int(wy)), 3, (255, 0, 0), -1)  # Blue for wheels
                 
                 # Draw centroid
                 color = (0, 255, 0) if lane_id is not None else (0, 0, 255)
