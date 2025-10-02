@@ -114,37 +114,6 @@ def dict_points_to_tuples(points):
             result.append((x, y))
     return result
 
-def map_to_standard_vehicle_class(detected_class):
-    """
-    Map various YOLO detection classes to standardized vehicle classes
-    matching the TMC system classification.
-    
-    Standard classes: cars, mediums, heavy_trucks, pedestrians, bicycles
-    """
-    detected_class = detected_class.lower().strip()
-    
-    # Cars - light vehicles
-    if detected_class in ['car', 'vehicle', 'auto', 'sedan', 'suv', 'pickup', 'hatchback', 'coupe']:
-        return 'cars'
-    
-    # Medium vehicles - vans, small trucks, medium commercial vehicles
-    if detected_class in ['van', 'minivan', 'truck', 'delivery', 'medium_truck', 'box_truck', 'pickup_truck']:
-        return 'mediums'
-    
-    # Heavy trucks - large commercial vehicles
-    if detected_class in ['bus', 'semi', 'trailer', 'heavy_truck', 'tractor_trailer', 'lorry', 'articulated', 'big_truck']:
-        return 'heavy_trucks'
-    
-    # Pedestrians
-    if detected_class in ['person', 'pedestrian', 'people', 'human']:
-        return 'pedestrians'
-    
-    # Bicycles
-    if detected_class in ['bicycle', 'bike', 'cyclist', 'cycle']:
-        return 'bicycles'
-    
-    # Default fallback - classify unknown vehicles as cars
-    return 'cars'
 
 def point_side_of_line(p, a, b):
     """
@@ -202,9 +171,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     debug_tracked_objects = set()
     detected_classes = {}
     class_counts_by_id = {}
-    
-    # Standard vehicle class tracking by lane
-    standard_vehicle_counts_by_lane = {lane_id: {'cars': 0, 'mediums': 0, 'heavy_trucks': 0, 'pedestrians': 0, 'bicycles': 0} for lane_id, _ in lane_polygons}
+
+    # Track raw detection labels by lane (use defaultdict pattern)
+    from collections import defaultdict
+    vehicle_counts_by_lane = defaultdict(lambda: defaultdict(int))
     
     # Initialize video capture
     cap = cv2.VideoCapture(VIDEO_PATH)
@@ -386,20 +356,19 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 if side_prev * side_curr < 0:  # Changed sides
                     counted_ids.add(objectID)
                     lane_counts[lane_id] += 1
-                    
+
                     # Count detected class only ONCE per unique object ID
                     if objectID not in detected_classes:
                         detected_classes[objectID] = class_name
-                    
-                    # Map to standard vehicle class and increment lane-specific count
-                    standard_class = map_to_standard_vehicle_class(class_name)
-                    standard_vehicle_counts_by_lane[lane_id][standard_class] += 1
-                    
-                    # Track in minute tracker if enabled (pass standard class for consistency)
+
+                    # Use raw detection label (snake_case) directly
+                    vehicle_counts_by_lane[class_name][lane_id] += 1
+
+                    # Track in minute tracker if enabled (pass raw class name)
                     if minute_tracker:
-                        minute_tracker.process_vehicle_detection(frame_count, objectID, standard_class, lane_id)
-                    
-                    print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name} -> {standard_class}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
+                        minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
+
+                    print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
         
         # Add visualizations if generating output video
         if generate_video_output and video_writer:
@@ -493,26 +462,20 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     
     # Convert detected_classes from {obj_id: class_name} to {class_name: count}
     class_summary = Counter(detected_classes.values())
-    
-    # Create standardized vehicles structure by vehicle class, then by lane
-    vehicles_by_class = {}
-    for standard_class in ['cars', 'mediums', 'heavy_trucks', 'pedestrians', 'bicycles']:
-        vehicles_by_class[standard_class] = {}
-        for lane_id in lane_counts.keys():
-            vehicles_by_class[standard_class][lane_id] = standard_vehicle_counts_by_lane[lane_id][standard_class]
-    
-    # Create standard detected_classes summary from standardized counts
-    standard_detected_classes = {}
-    for lane_data in standard_vehicle_counts_by_lane.values():
-        for class_name, count in lane_data.items():
-            if class_name not in standard_detected_classes:
-                standard_detected_classes[class_name] = 0
-            standard_detected_classes[class_name] += count
-    
+
+    # Convert vehicle_counts_by_lane from defaultdict to regular dict for JSON serialization
+    # Structure: {detection_label: {lane_id: count}}
+    vehicles_by_class = {class_name: dict(lane_data) for class_name, lane_data in vehicle_counts_by_lane.items()}
+
+    # Create detected_classes summary from raw detection labels
+    detected_classes_summary = {}
+    for class_name, lane_data in vehicle_counts_by_lane.items():
+        detected_classes_summary[class_name] = sum(lane_data.values())
+
     return {
         "lane_counts": lane_counts,
         "total_count": total_count,
         "study_type": "ATR",
-        "detected_classes": standard_detected_classes,  # Use standardized classes
-        "vehicles": vehicles_by_class  # Add standardized vehicle data by class and lane
+        "detected_classes": detected_classes_summary,  # Raw detection labels with counts
+        "vehicles": vehicles_by_class  # Raw detection labels by lane: {class_name: {lane_id: count}}
     }
