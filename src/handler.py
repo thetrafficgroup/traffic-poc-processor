@@ -14,6 +14,7 @@ def handler(event):
     queue_url = event["input"]["queue_url"]
     study_type = event["input"].get("study_type", "TMC")  # Default to TMC
     generate_video_output = event["input"].get("generate_video_output", False)  # Default to False
+    trim_periods = event["input"].get("trim_periods", None)  # Optional trimming periods
 
     video_path = download_s3_file(bucket, video_key, "video.mp4")
     model_path = download_s3_file(bucket, model_key, "best.pt")
@@ -40,17 +41,26 @@ def handler(event):
         output_video_key = f"{base_key}_output.{extension}"
         output_video_path = f"output_{video_uuid}.{extension}"
 
-    # Process video with optional output generation
+    # Log trimming information
+    if trim_periods:
+        print(f"📊 Video trimming enabled: {len(trim_periods)} period(s)")
+        for i, period in enumerate(trim_periods):
+            print(f"   Period {i+1}: {period.get('start', 0)}s - {period.get('end', 0)}s")
+    else:
+        print("📊 No trimming specified, processing entire video")
+
+    # Process video with optional output generation and trimming
     results = process_video(
-        video_path, 
-        lines_data, 
-        model_path, 
+        video_path,
+        lines_data,
+        model_path,
         study_type,
         video_uuid=video_uuid,
         progress_callback=progress_callback,
         minute_batch_callback=minute_batch_callback,
         generate_video_output=generate_video_output,
-        output_video_path=output_video_path
+        output_video_path=output_video_path,
+        trim_periods=trim_periods
     )
 
     # Upload output video to S3 if generated

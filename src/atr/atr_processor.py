@@ -6,6 +6,11 @@ from shapely.geometry import Point, Polygon
 from ultralytics import YOLO
 from collections import OrderedDict, Counter
 from .atr_minute_tracker import ATRMinuteTracker
+import sys
+import os
+
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
 
 # === Centroid Tracker ===
 class CentroidTracker:
@@ -123,10 +128,10 @@ def point_side_of_line(p, a, b):
     # Ensure all coordinates are numeric (handle potential float/int mix)
     return (float(b[0]) - float(a[0])) * (float(p[1]) - float(a[1])) - (float(b[1]) - float(a[1])) * (float(p[0]) - float(a[0]))
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None, video_uuid=None, minute_batch_callback=None):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None, video_uuid=None, minute_batch_callback=None, trim_periods=None):
     """
-    Process video for ATR (Automatic Traffic Recording) analysis.
-    
+    Process video for ATR (Automatic Traffic Recording) analysis with optional trimming.
+
     Args:
         VIDEO_PATH: Path to video file
         LINES_DATA: Lane configuration data with lanes and finish_line
@@ -136,14 +141,23 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         output_video_path: Path for output video (if generate_video_output=True)
         video_uuid: UUID of the video being processed (optional, for minute tracking)
         minute_batch_callback: Optional callback for minute-by-minute batch data
-        
+        trim_periods: Optional list of trim periods in seconds [{"start": 3600, "end": 10800}, ...]
+
     Returns:
         Dictionary with lane counts and total count
     """
-    
+
+    # Validate trim periods if provided
+    if trim_periods:
+        is_valid, error_msg = validate_trim_periods(trim_periods)
+        if not is_valid:
+            print(f"⚠️ Invalid trim_periods: {error_msg}")
+            print("⚠️ Falling back to processing entire video")
+            trim_periods = None
+
     # Constants
     CONF_THRESHOLD = 0.1
-    
+
     # Load YOLO model
     model = YOLO(MODEL_PATH)
     
@@ -183,6 +197,19 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     frame_count = 0
     last_progress_sent = -1
     start_time = time.time()
+
+    # Calculate frame ranges from trim periods
+    frame_ranges = []
+    if trim_periods:
+        frame_ranges = calculate_frame_ranges_from_seconds(trim_periods, fps, total_frames)
+        if frame_ranges:
+            print(f"🎬 ATR Trimming enabled: processing {len(frame_ranges)} period(s)")
+            total_processing_frames = sum(r['end_frame'] - r['start_frame'] for r in frame_ranges)
+            print(f"   Total frames to process: {total_processing_frames} / {total_frames} ({total_processing_frames/total_frames*100:.1f}%)")
+        else:
+            print("⚠️ No valid frame ranges, processing entire video")
+    else:
+        print("📊 ATR: No trimming specified, processing entire video")
     
     # Initialize minute tracker if callback provided
     minute_tracker = None
@@ -249,13 +276,273 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         if not video_writer:
             print("❌ Could not initialize ATR video writer with any codec")
             generate_video_output = False
-    
-    # Process video frames
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if not ret:
-            break
-            
+
+    # Helper function to send seeking progress
+    def send_seeking_progress():
+        if progress_callback:
+            elapsed_time = time.time() - start_time
+            # During seeking, we can't accurately estimate time remaining
+            # Just show that we're seeking
+            progress_callback({
+                "progress": int((frame_count / total_frames) * 100),
+                "estimatedTimeRemaining": 0,
+                "status": "seeking"
+            })
+
+    # Helper function to reset tracker state
+    def reset_centroid_tracker():
+        """Reset CentroidTracker to start fresh tracking for new period"""
+        nonlocal tracker
+        tracker = CentroidTracker(max_disappeared=15)
+        print("🔄 ATR CentroidTracker reset - previous tracking state cleared")
+
+    # Main processing logic with frame-skipping support
+    if frame_ranges:
+        # TRIMMING MODE: Process only specified periods with frame-skipping
+        print("🎬 Starting trimmed ATR video processing")
+
+        for period_idx, period in enumerate(frame_ranges):
+            start_frame = period["start_frame"]
+            end_frame = period["end_frame"]
+            period_duration = (period["end_seconds"] - period["start_seconds"]) / 60  # minutes
+
+            print(f"\n📍 ATR Period {period_idx + 1}/{len(frame_ranges)}")
+            print(f"   Frames: {start_frame} - {end_frame} ({end_frame - start_frame} frames)")
+            print(f"   Time: {period['start_seconds']:.1f}s - {period['end_seconds']:.1f}s ({period_duration:.1f} min)")
+
+            # CRITICAL: Reset tracker at start of each period
+            reset_centroid_tracker()
+
+            # Clear previous positions to prevent cross-period tracking
+            previous_positions.clear()
+            print("🧹 Previous positions cleared for new period")
+
+            # Skip frames until we reach the start of this period (frame-skipping)
+            while frame_count < start_frame:
+                ret, _ = cap.read()  # Read but don't process
+                if not ret:
+                    print(f"⚠️ Video ended at frame {frame_count} while seeking to {start_frame}")
+                    break
+
+                frame_count += 1
+
+                # Progress update every 1000 frames during seeking
+                if frame_count % 1000 == 0:
+                    send_seeking_progress()
+                    print(f"⏩ Seeking: {frame_count}/{start_frame} frames ({frame_count/start_frame*100:.1f}%)")
+
+            if not ret:
+                print(f"⚠️ Could not reach period {period_idx + 1}, skipping")
+                continue
+
+            print(f"✅ Reached start of period {period_idx + 1} at frame {frame_count}")
+
+            # Process frames in this period
+            while frame_count < end_frame:
+                ret, frame = cap.read()
+                if not ret:
+                    print(f"⚠️ Video ended at frame {frame_count} during period {period_idx + 1}")
+                    break
+
+                frame_count += 1
+
+                # Progress tracking (send every 5% like TMC)
+                if progress_callback and total_frames > 0:
+                    progress = int((frame_count / total_frames) * 100)
+
+                    # Send progress every 5%
+                    if progress >= last_progress_sent + 5 and progress < 100:
+                        elapsed_time = time.time() - start_time
+                        if progress > 0:
+                            estimated_total_time = elapsed_time / (progress / 100)
+                            estimated_remaining_time = int(estimated_total_time - elapsed_time)
+                        else:
+                            estimated_remaining_time = 0
+
+                        progress_callback({
+                            "progress": progress,
+                            "estimatedTimeRemaining": max(0, estimated_remaining_time)
+                        })
+                        last_progress_sent = progress
+
+                # YOLO detection
+                results = model.predict(frame, conf=CONF_THRESHOLD)
+                boxes = results[0].boxes
+
+                input_centroids = []
+                detections_map = {}
+
+                # Only process if there are detections
+                if boxes is not None and len(boxes) > 0:
+                    for i, box in enumerate(boxes):
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        class_id = int(box.cls[0].cpu().numpy())
+                        class_name = model.names[class_id]
+                        cx, cy = get_centroid((x1, y1, x2, y2))
+                        wx, wy = get_wheels_position((x1, y1, x2, y2))
+                        input_centroids.append(np.array([cx, cy]))
+                        detections_map[(cx, cy)] = (x1, y1, x2, y2, class_name, wx, wy)
+                        debug_total_detections += 1
+
+                # Update tracker
+                objects = tracker.update(np.array(input_centroids))
+
+                # Process tracked objects
+                for objectID, centroid in objects.items():
+                    debug_tracked_objects.add(objectID)
+                    cx, cy = centroid
+                    pt = Point(cx, cy)
+                    lane_id = None
+
+                    # Find class for this detection
+                    class_name = "unknown"
+                    for (det_cx, det_cy), detection_data in detections_map.items():
+                        if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
+                            if len(detection_data) > 4:  # Has class_name
+                                class_name = detection_data[4]
+                            break
+                    class_counts_by_id[objectID] = class_name
+
+                    # Find which lane the object is in using wheels-priority approach
+                    wheels_x, wheels_y = None, None
+                    # Extract wheels position from detection data if available
+                    for (det_cx, det_cy), detection_data in detections_map.items():
+                        if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
+                            if len(detection_data) > 6:  # Has wheels coordinates
+                                wheels_x, wheels_y = detection_data[5], detection_data[6]
+                            break
+
+                    # Use wheels-priority detection if wheels data available
+                    if wheels_x is not None and wheels_y is not None:
+                        lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered)
+                    else:
+                        # Fallback to original centroid-only method for compatibility
+                        for lid, buffered_polygon in lane_polygons_buffered:
+                            if buffered_polygon.contains(pt):
+                                lane_id = lid
+                                break
+
+                    # Initialize position history
+                    if objectID not in previous_positions:
+                        previous_positions[objectID] = []
+
+                    previous_positions[objectID].append((cx, cy))
+
+                    # Check finish line crossing
+                    if (
+                        objectID not in counted_ids and
+                        lane_id is not None and
+                        finish_line is not None and
+                        len(previous_positions[objectID]) >= 2
+                    ):
+                        a, b = finish_line
+                        prev = previous_positions[objectID][-2]
+                        curr = previous_positions[objectID][-1]
+                        side_prev = point_side_of_line(prev, a, b)
+                        side_curr = point_side_of_line(curr, a, b)
+
+                        if side_prev * side_curr < 0:  # Changed sides
+                            counted_ids.add(objectID)
+                            lane_counts[lane_id] += 1
+
+                            # Count detected class only ONCE per unique object ID
+                            if objectID not in detected_classes:
+                                detected_classes[objectID] = class_name
+
+                            # Use raw detection label (snake_case) directly
+                            vehicle_counts_by_lane[class_name][lane_id] += 1
+
+                            # Track in minute tracker if enabled (pass raw class name)
+                            if minute_tracker:
+                                minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
+
+                            print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
+
+                # Add visualizations if generating output video
+                if generate_video_output and video_writer:
+                    # Draw detections and tracking
+                    for objectID, centroid in objects.items():
+                        cx, cy = int(centroid[0]), int(centroid[1])
+
+                        # Find lane for this object using wheels-priority approach
+                        pt = Point(cx, cy)
+                        lane_id = None
+                        # Try to get wheels position from detections_map
+                        wheels_x, wheels_y = None, None
+                        for (det_cx, det_cy), detection_data in detections_map.items():
+                            if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
+                                if len(detection_data) > 6:
+                                    wheels_x, wheels_y = detection_data[5], detection_data[6]
+                                break
+
+                        if wheels_x is not None and wheels_y is not None:
+                            lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered)
+                        else:
+                            for lid, buffered_polygon in lane_polygons_buffered:
+                                if buffered_polygon.contains(pt):
+                                    lane_id = lid
+                                    break
+
+                        # Draw bounding box if available
+                        if (cx, cy) in detections_map:
+                            detection_data = detections_map[(cx, cy)]
+                            x1, y1, x2, y2, class_name_viz = detection_data[:5]
+                            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+
+                            # Draw wheels position if available (for debugging)
+                            if len(detection_data) > 6:
+                                wx, wy = detection_data[5], detection_data[6]
+                                cv2.circle(frame, (int(wx), int(wy)), 3, (255, 0, 0), -1)  # Blue for wheels
+
+                        # Draw centroid
+                        color = (0, 255, 0) if lane_id is not None else (0, 0, 255)
+                        cv2.circle(frame, (cx, cy), 5, color, -1)
+                        cv2.putText(frame, f'ID {objectID} | L{lane_id}', (cx, cy - 10),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+
+                    # Draw finish line
+                    if finish_line is not None and len(finish_line) == 2:
+                        pt1 = tuple(map(int, finish_line[0]))
+                        pt2 = tuple(map(int, finish_line[1]))
+                        cv2.line(frame, pt1, pt2, (255, 0, 255), 3)
+
+                    # Draw lanes and counts
+                    for lane in lanes:
+                        pts = np.array(lane["points"], np.int32).reshape((-1, 1, 2))
+                        cv2.polylines(frame, [pts], isClosed=True, color=(0, 255, 255), thickness=2)
+                        cv2.putText(frame, f'L{lane["id"]}: {lane_counts[lane["id"]]}',
+                                   (pts[0][0][0], pts[0][0][1] - 8),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+                    # Draw total count
+                    total_count_current = sum(lane_counts.values())
+                    cv2.putText(frame, f'Total: {total_count_current}', (20, 40),
+                               cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 255), 3)
+
+                    # Resize frame if needed for compression
+                    if width != orig_width or height != orig_height:
+                        frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+
+                    # Write frame to output video
+                    video_writer.write(frame)
+
+                # Small delay to stabilize tracking (similar to cv2.waitKey in example.py)
+                time.sleep(0.001)  # 1ms delay to prevent too rapid processing
+
+            print(f"✅ Completed period {period_idx + 1}/{len(frame_ranges)}")
+
+        print("\n✅ All ATR trim periods processed")
+
+    else:
+        # NORMAL MODE: Process entire video (existing logic)
+        print("📊 Processing entire ATR video (no trimming)")
+
+        # Process video frames
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
         frame_count += 1
         
         # Progress tracking (send every 5% like TMC)
