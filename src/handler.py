@@ -5,7 +5,7 @@ from aws_utils import download_s3_file, send_sqs_message, upload_s3_file
 from response_normalizer import normalize_response
 
 def handler(event):
-    print("🚀 HANDLER STARTED with event:", event)  # DEBUG
+    print("🚀 HANDLER STARTED with event: ", event)  # DEBUG
     bucket = event["input"]["s3_bucket"]
     video_key = event["input"]["video_key"]
     video_uuid = event["input"]["video_uuid"]
