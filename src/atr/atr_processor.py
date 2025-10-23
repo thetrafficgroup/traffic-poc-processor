@@ -543,190 +543,190 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             if not ret:
                 break
 
-        frame_count += 1
-        
-        # Progress tracking (send every 5% like TMC)
-        if progress_callback and total_frames > 0:
-            progress = int((frame_count / total_frames) * 100)
-            
-            # Send progress every 5%
-            if progress >= last_progress_sent + 5 and progress < 100:
-                elapsed_time = time.time() - start_time
-                if progress > 0:
-                    estimated_total_time = elapsed_time / (progress / 100)
-                    estimated_remaining_time = int(estimated_total_time - elapsed_time)
-                else:
-                    estimated_remaining_time = 0
-                
-                progress_callback({
-                    "progress": progress,
-                    "estimatedTimeRemaining": max(0, estimated_remaining_time)
-                })
-                last_progress_sent = progress
-        
-        # YOLO detection
-        results = model.predict(frame, conf=CONF_THRESHOLD)
-        boxes = results[0].boxes
-        
-        input_centroids = []
-        detections_map = {}
-        
-        # Only process if there are detections
-        if boxes is not None and len(boxes) > 0:
-            for i, box in enumerate(boxes):
-                x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                class_id = int(box.cls[0].cpu().numpy())
-                class_name = model.names[class_id]
-                cx, cy = get_centroid((x1, y1, x2, y2))
-                wx, wy = get_wheels_position((x1, y1, x2, y2))
-                input_centroids.append(np.array([cx, cy]))
-                detections_map[(cx, cy)] = (x1, y1, x2, y2, class_name, wx, wy)
-                debug_total_detections += 1
-        
-        # Update tracker
-        objects = tracker.update(np.array(input_centroids))
-        
-        # Process tracked objects
-        for objectID, centroid in objects.items():
-            debug_tracked_objects.add(objectID)
-            cx, cy = centroid
-            pt = Point(cx, cy)
-            lane_id = None
-            
-            # Find class for this detection
-            class_name = "unknown"
-            for (det_cx, det_cy), detection_data in detections_map.items():
-                if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
-                    if len(detection_data) > 4:  # Has class_name
-                        class_name = detection_data[4]
-                    break
-            class_counts_by_id[objectID] = class_name
-            
-            # Find which lane the object is in using wheels-priority approach
-            wheels_x, wheels_y = None, None
-            # Extract wheels position from detection data if available
-            for (det_cx, det_cy), detection_data in detections_map.items():
-                if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
-                    if len(detection_data) > 6:  # Has wheels coordinates
-                        wheels_x, wheels_y = detection_data[5], detection_data[6]
-                    break
-            
-            # Use wheels-priority detection if wheels data available
-            if wheels_x is not None and wheels_y is not None:
-                lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered)
-            else:
-                # Fallback to original centroid-only method for compatibility
-                for lid, buffered_polygon in lane_polygons_buffered:
-                    if buffered_polygon.contains(pt):
-                        lane_id = lid
-                        break
-            
-            # Initialize position history
-            if objectID not in previous_positions:
-                previous_positions[objectID] = []
-            
-            previous_positions[objectID].append((cx, cy))
-            
-            # Check finish line crossing
-            if (
-                objectID not in counted_ids and
-                lane_id is not None and
-                finish_line is not None and
-                len(previous_positions[objectID]) >= 2
-            ):
-                a, b = finish_line
-                prev = previous_positions[objectID][-2]
-                curr = previous_positions[objectID][-1]
-                side_prev = point_side_of_line(prev, a, b)
-                side_curr = point_side_of_line(curr, a, b)
-                
-                if side_prev * side_curr < 0:  # Changed sides
-                    counted_ids.add(objectID)
-                    lane_counts[lane_id] += 1
+            frame_count += 1
 
-                    # Count detected class only ONCE per unique object ID
-                    if objectID not in detected_classes:
-                        detected_classes[objectID] = class_name
+            # Progress tracking (send every 5% like TMC)
+            if progress_callback and total_frames > 0:
+                progress = int((frame_count / total_frames) * 100)
 
-                    # Use raw detection label (snake_case) directly
-                    vehicle_counts_by_lane[class_name][lane_id] += 1
+                # Send progress every 5%
+                if progress >= last_progress_sent + 5 and progress < 100:
+                    elapsed_time = time.time() - start_time
+                    if progress > 0:
+                        estimated_total_time = elapsed_time / (progress / 100)
+                        estimated_remaining_time = int(estimated_total_time - elapsed_time)
+                    else:
+                        estimated_remaining_time = 0
 
-                    # Track in minute tracker if enabled (pass raw class name)
-                    if minute_tracker:
-                        minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
+                    progress_callback({
+                        "progress": progress,
+                        "estimatedTimeRemaining": max(0, estimated_remaining_time)
+                    })
+                    last_progress_sent = progress
 
-                    print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
-        
-        # Add visualizations if generating output video
-        if generate_video_output and video_writer:
-            # Draw detections and tracking
+            # YOLO detection
+            results = model.predict(frame, conf=CONF_THRESHOLD)
+            boxes = results[0].boxes
+
+            input_centroids = []
+            detections_map = {}
+
+            # Only process if there are detections
+            if boxes is not None and len(boxes) > 0:
+                for i, box in enumerate(boxes):
+                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                    class_id = int(box.cls[0].cpu().numpy())
+                    class_name = model.names[class_id]
+                    cx, cy = get_centroid((x1, y1, x2, y2))
+                    wx, wy = get_wheels_position((x1, y1, x2, y2))
+                    input_centroids.append(np.array([cx, cy]))
+                    detections_map[(cx, cy)] = (x1, y1, x2, y2, class_name, wx, wy)
+                    debug_total_detections += 1
+
+            # Update tracker
+            objects = tracker.update(np.array(input_centroids))
+
+            # Process tracked objects
             for objectID, centroid in objects.items():
-                cx, cy = int(centroid[0]), int(centroid[1])
-                
-                # Find lane for this object using wheels-priority approach
+                debug_tracked_objects.add(objectID)
+                cx, cy = centroid
                 pt = Point(cx, cy)
                 lane_id = None
-                # Try to get wheels position from detections_map
-                wheels_x, wheels_y = None, None
+
+                # Find class for this detection
+                class_name = "unknown"
                 for (det_cx, det_cy), detection_data in detections_map.items():
-                    if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
-                        if len(detection_data) > 6:
+                    if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
+                        if len(detection_data) > 4:  # Has class_name
+                            class_name = detection_data[4]
+                        break
+                class_counts_by_id[objectID] = class_name
+
+                # Find which lane the object is in using wheels-priority approach
+                wheels_x, wheels_y = None, None
+                # Extract wheels position from detection data if available
+                for (det_cx, det_cy), detection_data in detections_map.items():
+                    if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
+                        if len(detection_data) > 6:  # Has wheels coordinates
                             wheels_x, wheels_y = detection_data[5], detection_data[6]
                         break
-                
+
+                # Use wheels-priority detection if wheels data available
                 if wheels_x is not None and wheels_y is not None:
                     lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered)
                 else:
+                    # Fallback to original centroid-only method for compatibility
                     for lid, buffered_polygon in lane_polygons_buffered:
                         if buffered_polygon.contains(pt):
                             lane_id = lid
                             break
-                
-                # Draw bounding box if available
-                if (cx, cy) in detections_map:
-                    detection_data = detections_map[(cx, cy)]
-                    x1, y1, x2, y2, class_name_viz = detection_data[:5]
-                    cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                    
-                    # Draw wheels position if available (for debugging)
-                    if len(detection_data) > 6:
-                        wx, wy = detection_data[5], detection_data[6]
-                        cv2.circle(frame, (int(wx), int(wy)), 3, (255, 0, 0), -1)  # Blue for wheels
-                
-                # Draw centroid
-                color = (0, 255, 0) if lane_id is not None else (0, 0, 255)
-                cv2.circle(frame, (cx, cy), 5, color, -1)
-                cv2.putText(frame, f'ID {objectID} | L{lane_id}', (cx, cy - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-            
-            # Draw finish line
-            if finish_line is not None and len(finish_line) == 2:
-                pt1 = tuple(map(int, finish_line[0]))
-                pt2 = tuple(map(int, finish_line[1]))
-                cv2.line(frame, pt1, pt2, (255, 0, 255), 3)
-            
-            # Draw lanes and counts
-            for lane in lanes:
-                pts = np.array(lane["points"], np.int32).reshape((-1, 1, 2))
-                cv2.polylines(frame, [pts], isClosed=True, color=(0, 255, 255), thickness=2)
-                cv2.putText(frame, f'L{lane["id"]}: {lane_counts[lane["id"]]}',
-                           (pts[0][0][0], pts[0][0][1] - 8),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            
-            # Draw total count
-            total_count_current = sum(lane_counts.values())
-            cv2.putText(frame, f'Total: {total_count_current}', (20, 40), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 255), 3)
-            
-            # Resize frame if needed for compression
-            if width != orig_width or height != orig_height:
-                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
-            
-            # Write frame to output video
-            video_writer.write(frame)
-        
-        # Small delay to stabilize tracking (similar to cv2.waitKey in example.py)
-        time.sleep(0.001)  # 1ms delay to prevent too rapid processing
+
+                # Initialize position history
+                if objectID not in previous_positions:
+                    previous_positions[objectID] = []
+
+                previous_positions[objectID].append((cx, cy))
+
+                # Check finish line crossing
+                if (
+                    objectID not in counted_ids and
+                    lane_id is not None and
+                    finish_line is not None and
+                    len(previous_positions[objectID]) >= 2
+                ):
+                    a, b = finish_line
+                    prev = previous_positions[objectID][-2]
+                    curr = previous_positions[objectID][-1]
+                    side_prev = point_side_of_line(prev, a, b)
+                    side_curr = point_side_of_line(curr, a, b)
+
+                    if side_prev * side_curr < 0:  # Changed sides
+                        counted_ids.add(objectID)
+                        lane_counts[lane_id] += 1
+
+                        # Count detected class only ONCE per unique object ID
+                        if objectID not in detected_classes:
+                            detected_classes[objectID] = class_name
+
+                        # Use raw detection label (snake_case) directly
+                        vehicle_counts_by_lane[class_name][lane_id] += 1
+
+                        # Track in minute tracker if enabled (pass raw class name)
+                        if minute_tracker:
+                            minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
+
+                        print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
+
+            # Add visualizations if generating output video
+            if generate_video_output and video_writer:
+                # Draw detections and tracking
+                for objectID, centroid in objects.items():
+                    cx, cy = int(centroid[0]), int(centroid[1])
+
+                    # Find lane for this object using wheels-priority approach
+                    pt = Point(cx, cy)
+                    lane_id = None
+                    # Try to get wheels position from detections_map
+                    wheels_x, wheels_y = None, None
+                    for (det_cx, det_cy), detection_data in detections_map.items():
+                        if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
+                            if len(detection_data) > 6:
+                                wheels_x, wheels_y = detection_data[5], detection_data[6]
+                            break
+
+                    if wheels_x is not None and wheels_y is not None:
+                        lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered)
+                    else:
+                        for lid, buffered_polygon in lane_polygons_buffered:
+                            if buffered_polygon.contains(pt):
+                                lane_id = lid
+                                break
+
+                    # Draw bounding box if available
+                    if (cx, cy) in detections_map:
+                        detection_data = detections_map[(cx, cy)]
+                        x1, y1, x2, y2, class_name_viz = detection_data[:5]
+                        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+
+                        # Draw wheels position if available (for debugging)
+                        if len(detection_data) > 6:
+                            wx, wy = detection_data[5], detection_data[6]
+                            cv2.circle(frame, (int(wx), int(wy)), 3, (255, 0, 0), -1)  # Blue for wheels
+
+                    # Draw centroid
+                    color = (0, 255, 0) if lane_id is not None else (0, 0, 255)
+                    cv2.circle(frame, (cx, cy), 5, color, -1)
+                    cv2.putText(frame, f'ID {objectID} | L{lane_id}', (cx, cy - 10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+
+                # Draw finish line
+                if finish_line is not None and len(finish_line) == 2:
+                    pt1 = tuple(map(int, finish_line[0]))
+                    pt2 = tuple(map(int, finish_line[1]))
+                    cv2.line(frame, pt1, pt2, (255, 0, 255), 3)
+
+                # Draw lanes and counts
+                for lane in lanes:
+                    pts = np.array(lane["points"], np.int32).reshape((-1, 1, 2))
+                    cv2.polylines(frame, [pts], isClosed=True, color=(0, 255, 255), thickness=2)
+                    cv2.putText(frame, f'L{lane["id"]}: {lane_counts[lane["id"]]}',
+                               (pts[0][0][0], pts[0][0][1] - 8),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+                # Draw total count
+                total_count_current = sum(lane_counts.values())
+                cv2.putText(frame, f'Total: {total_count_current}', (20, 40),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 255), 3)
+
+                # Resize frame if needed for compression
+                if width != orig_width or height != orig_height:
+                    frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+
+                # Write frame to output video
+                video_writer.write(frame)
+
+            # Small delay to stabilize tracking (similar to cv2.waitKey in example.py)
+            time.sleep(0.001)  # 1ms delay to prevent too rapid processing
     
     cap.release()
     if video_writer:
