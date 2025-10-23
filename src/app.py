@@ -18,7 +18,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", study_type="TMC"
         trim_periods: Optional list of trim periods in seconds [{"start": 3600, "end": 10800}, ...]
 
     Returns:
-        Processing results based on study type
+        Processing results based on study type.
     """
 
     if study_type.upper() == "TMC":
