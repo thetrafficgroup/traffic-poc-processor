@@ -318,6 +318,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             print("🧹 Previous positions cleared for new period")
 
             # Skip frames until we reach the start of this period (frame-skipping)
+            ret = True  # Initialize to True - if no seeking needed, we're already at the right position
             while frame_count < start_frame:
                 ret, _ = cap.read()  # Read but don't process
                 if not ret:
