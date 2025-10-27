@@ -351,8 +351,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # Helper function to reset tracker state
     def reset_tracker():
         """Reset YOLO tracker to start fresh tracking for new period"""
-        model.predictor.trackers = [None]
-        print("🔄 YOLO tracker reset - previous tracking state cleared")
+        if model.predictor is not None:
+            model.predictor.trackers = [None]
+            print("🔄 YOLO tracker reset - previous tracking state cleared")
+        else:
+            print("🔄 YOLO tracker not initialized yet (first period)")
 
     # Helper function for progress calculation
     def calculate_and_send_progress():
