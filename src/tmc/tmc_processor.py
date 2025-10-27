@@ -245,6 +245,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     start_time = time.time()
     last_progress_sent = -1
 
+    # Progress tracking: frames actually processed (not just video position)
+    frames_processed_total = 0
+
     # Calculate frame ranges from trim periods
     frame_ranges = []
     if trim_periods:
@@ -257,7 +260,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             print("⚠️ No valid frame ranges, processing entire video")
     else:
         print("📊 No trimming specified, processing entire video")
-    
+
+    # Calculate total_processing_frames for normal mode too (for unified progress calculation)
+    if not frame_ranges:
+        total_processing_frames = total_frames
+
     # Initialize minute tracker if callback provided
     minute_tracker = None
     if minute_batch_callback:
@@ -346,6 +353,60 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         """Reset YOLO tracker to start fresh tracking for new period"""
         model.predictor.trackers = [None]
         print("🔄 YOLO tracker reset - previous tracking state cleared")
+
+    # Helper function for progress calculation
+    def calculate_and_send_progress():
+        """
+        Calculate progress based on actual frames processed (trimming-aware).
+
+        For trimmed videos:
+            progress = frames_processed_total / total_processing_frames
+        For normal videos:
+            progress = current_frame / total_frames (backward compatible)
+
+        Ensures progress never decreases and respects 5% threshold.
+        """
+        nonlocal last_progress_sent
+
+        if not progress_callback or total_frames == 0:
+            return
+
+        # Calculate progress based on mode
+        if frame_ranges:
+            # TRIMMING MODE: Use frames actually processed
+            if total_processing_frames > 0:
+                progress = int((frames_processed_total / total_processing_frames) * 100)
+            else:
+                progress = 0
+        else:
+            # NORMAL MODE: Use video position (backward compatible)
+            progress = int((current_frame / total_frames) * 100)
+
+        # Ensure progress never exceeds 100% or decreases
+        progress = min(100, max(0, progress))
+
+        # Send progress every 5%
+        if progress >= last_progress_sent + 5 and progress < 100:
+            elapsed_time = time.time() - start_time
+
+            # Calculate time estimate
+            if progress > 0:
+                if frame_ranges and total_processing_frames > 0:
+                    # TRIMMING MODE: Estimate based on frames processed, not video position
+                    estimated_total_time = elapsed_time / (frames_processed_total / total_processing_frames)
+                else:
+                    # NORMAL MODE: Use progress percentage
+                    estimated_total_time = elapsed_time / (progress / 100)
+
+                estimated_remaining_time = int(estimated_total_time - elapsed_time)
+            else:
+                estimated_remaining_time = 0
+
+            progress_callback({
+                "progress": progress,
+                "estimatedTimeRemaining": max(0, estimated_remaining_time)
+            })
+            last_progress_sent = progress
 
     # Main processing logic with frame-skipping support
     if frame_ranges:
@@ -579,23 +640,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
                 # Progress tracking
                 current_frame += 1
-                if progress_callback and total_frames > 0:
-                    progress = int((current_frame / total_frames) * 100)
-
-                    # Send progress every 5%
-                    if progress >= last_progress_sent + 5 and progress < 100:
-                        elapsed_time = time.time() - start_time
-                        if progress > 0:
-                            estimated_total_time = elapsed_time / (progress / 100)
-                            estimated_remaining_time = int(estimated_total_time - elapsed_time)
-                        else:
-                            estimated_remaining_time = 0
-
-                        progress_callback({
-                            "progress": progress,
-                            "estimatedTimeRemaining": max(0, estimated_remaining_time)
-                        })
-                        last_progress_sent = progress
+                frames_processed_total += 1  # Track actual frames processed
+                calculate_and_send_progress()
 
             print(f"✅ Completed period {period_idx + 1}/{len(frame_ranges)}")
 
@@ -614,201 +660,194 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                 frame, persist=True, conf=CONF_THRESHOLD, imgsz=IMG_SIZE, iou=IOU_THRESHOLD
             )
 
-        if results[0].boxes.id is not None:
-            ids = results[0].boxes.id.cpu().numpy()
-            boxes = results[0].boxes.xyxy.cpu().numpy()
-            classes = results[0].boxes.cls.cpu().numpy()
-            scores = results[0].boxes.conf.cpu().numpy()
-            
-            # Apply overlap detection improvements
-            processed_boxes, processed_scores, processed_classes, processed_ids = post_process_detections(
-                boxes, scores, classes, ids
-            )
-            
-            # Update overlap statistics
-            if len(processed_boxes) > 1:
-                frame_stats = analyze_overlap_patterns(processed_boxes, processed_ids, {})
-                if frame_stats['overlapping_pairs'] > 0:
-                    overlap_stats["frames_with_overlaps"] += 1
-                    overlap_stats["total_overlaps"] += frame_stats['overlapping_pairs']
-            
-            # Use processed detections for tracking
-            boxes = processed_boxes
-            ids = processed_ids if processed_ids is not None else ids
-            classes = processed_classes
-
-            for i, box in enumerate(boxes):
-                obj_id = int(ids[i])
-                class_id = int(classes[i])
-                class_name = model.names[class_id]
-                cx, cy = get_centroid(box)
-                
-                # Store class for this object ID
-                class_counts_by_id[obj_id] = class_name
-                
-                # Update track interpolator
-                track_interpolator.update_track(obj_id, (cx, cy), current_frame)
-
-                prev_pos = prev_centroids.get(obj_id)
-                if prev_pos:
-                    for line in LINES:
-                        name = line["name"]
-                        x1, y1 = line["pt1"]
-                        x2, y2 = line["pt2"]
-
-                        dist = point_line_distance(cx, cy, x1, y1, x2, y2)
-                        prev_dist = point_line_distance(
-                            prev_pos[0], prev_pos[1], x1, y1, x2, y2
-                        )
-
-                        crossed = dist < DIST_THRESHOLD and prev_dist > DIST_THRESHOLD
-
-                        if crossed and obj_id not in counted_ids_per_line[name]:
-                            counted_ids_per_line[name].add(obj_id)
-                            counts[name] += 1
-
-                            # Verificar si está entrando desde afuera (para conteo total)
-                            if is_entering_from_outside(name, prev_pos, (cx, cy), line):
-                                entry_counted_ids.add(obj_id)
-                                print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (ENTRADA desde afuera)')
-                                
-                                # Count detected class only for vehicles entering from outside
-                                if obj_id not in detected_classes:
-                                    detected_classes[obj_id] = class_name
-                            else:
-                                print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (interno, no cuenta para total)')
-
-                            # Registrar el cruce con timestamp
-                            if obj_id not in crossed_lines_by_id:
-                                crossed_lines_by_id[obj_id] = []
-                                crossing_timestamps[obj_id] = []
-                            
-                            if name not in [crossing[0] for crossing in crossing_timestamps[obj_id]]:
-                                current_time = time.time()
-                                crossed_lines_by_id[obj_id].append(name)
-                                crossing_timestamps[obj_id].append((name, current_time))
-
-                            # Detectar giro cuando haya al menos 2 cruces y no se haya clasificado aún
-                            if len(crossing_timestamps[obj_id]) >= 2 and obj_id not in turn_types_by_id:
-                                turn_type = classify_turn_from_lines(crossing_timestamps[obj_id])
-                                if turn_type != 'invalid' and turn_type != 'unknown':
-                                    turn_types_by_id[obj_id] = turn_type
-                                    from_line = crossing_timestamps[obj_id][0][0]
-                                    to_line = crossing_timestamps[obj_id][-1][0]
-                                    print(f'↪ ID {obj_id} ({class_name}) hizo un giro {turn_type}: {from_line} -> {to_line}')
-
-                prev_centroids[obj_id] = (cx, cy)
-        
-        # Handle missing detections with track interpolation
-        # Clean up old tracks to prevent memory buildup
-        if current_frame % 30 == 0:  # Every 30 frames
-            track_interpolator.cleanup_old_tracks(current_frame, max_age=150)
-        
-        # Add visualizations if generating output video
-        if generate_video_output and video_writer:
-            # Draw detection boxes and tracking
             if results[0].boxes.id is not None:
                 ids = results[0].boxes.id.cpu().numpy()
                 boxes = results[0].boxes.xyxy.cpu().numpy()
-                
+                classes = results[0].boxes.cls.cpu().numpy()
+                scores = results[0].boxes.conf.cpu().numpy()
+
+                # Apply overlap detection improvements
+                processed_boxes, processed_scores, processed_classes, processed_ids = post_process_detections(
+                    boxes, scores, classes, ids
+                )
+
+                # Update overlap statistics
+                if len(processed_boxes) > 1:
+                    frame_stats = analyze_overlap_patterns(processed_boxes, processed_ids, {})
+                    if frame_stats['overlapping_pairs'] > 0:
+                        overlap_stats["frames_with_overlaps"] += 1
+                        overlap_stats["total_overlaps"] += frame_stats['overlapping_pairs']
+
+                # Use processed detections for tracking
+                boxes = processed_boxes
+                ids = processed_ids if processed_ids is not None else ids
+                classes = processed_classes
+
                 for i, box in enumerate(boxes):
                     obj_id = int(ids[i])
-                    x1, y1, x2, y2 = box
+                    class_id = int(classes[i])
+                    class_name = model.names[class_id]
                     cx, cy = get_centroid(box)
-                    
-                    # Draw bounding box
-                    cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
-                    
-                    # Draw centroid
-                    cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
-                    
-                    # Draw ID and turn type if available
-                    label = f'ID {obj_id}'
-                    if obj_id in turn_types_by_id:
-                        label += f' | {turn_types_by_id[obj_id]}'
-                    cv2.putText(frame, label, (cx, cy - 10),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
-            
-            # Draw lines
-            for line in LINES:
-                name = line["name"]
-                x1, y1 = line["pt1"] 
-                x2, y2 = line["pt2"]
-                cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
-                
-                # Draw line label and count
-                mid_x, mid_y = (x1 + x2) // 2, (y1 + y2) // 2
-                cv2.putText(frame, f'{name}: {counts[name]}', (mid_x, mid_y - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            
-            # Draw summary stats
-            total_current = sum(counts.values())
-            turn_summary = dict(Counter(turn_types_by_id.values()))
-            y_pos = 30
-            cv2.putText(frame, f'Total Crossings: {total_current}', (20, y_pos), 
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
-            
-            for turn_type, count in turn_summary.items():
-                y_pos += 25
-                cv2.putText(frame, f'{turn_type}: {count}', (20, y_pos),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
-            
-            # Resize frame if needed for compression
-            if width != int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or height != int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)):
-                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
-            
-            # Write frame to output video
-            video_writer.write(frame)
-        
-        # Update minute tracker with vehicle detections that have complete movement data
-        if minute_tracker:
-            # Process vehicles that have completed their movement (have both origin and turn data)
-            for vehicle_id in turn_types_by_id:
-                # Only process if vehicle has crossed lines and we know its movement
-                if vehicle_id in crossing_timestamps and len(crossing_timestamps[vehicle_id]) >= 2:
-                    # Only process vehicles that entered from outside (to match final results)
-                    if vehicle_id in entry_counted_ids:
-                        # Only process each vehicle once for minute tracking
-                        if vehicle_id not in minute_processed_vehicles:
-                            minute_processed_vehicles.add(vehicle_id)
-                            
-                            # Get vehicle class (use detected_classes for consistency with final results)
-                            vehicle_class = detected_classes.get(vehicle_id, 'unknown')
-                            
-                            # Get origin direction (first line crossed)
-                            origin_direction = crossing_timestamps[vehicle_id][0][0].upper()
-                            
-                            # Get turn type
-                            turn_type = turn_types_by_id[vehicle_id]
-                            
-                            # Process this vehicle detection
-                            minute_tracker.process_vehicle_detection(
-                                current_frame,
-                                vehicle_id,
-                                vehicle_class,
-                                origin_direction,
-                                turn_type
+
+                    # Store class for this object ID
+                    class_counts_by_id[obj_id] = class_name
+
+                    # Update track interpolator
+                    track_interpolator.update_track(obj_id, (cx, cy), current_frame)
+
+                    prev_pos = prev_centroids.get(obj_id)
+                    if prev_pos:
+                        for line in LINES:
+                            name = line["name"]
+                            x1, y1 = line["pt1"]
+                            x2, y2 = line["pt2"]
+
+                            dist = point_line_distance(cx, cy, x1, y1, x2, y2)
+                            prev_dist = point_line_distance(
+                                prev_pos[0], prev_pos[1], x1, y1, x2, y2
                             )
-        
-        # Progress tracking
-        current_frame += 1
-        if progress_callback and total_frames > 0:
-            progress = int((current_frame / total_frames) * 100)
-            
-            # Send progress every 5%
-            if progress >= last_progress_sent + 5 and progress < 100:
-                elapsed_time = time.time() - start_time
-                if progress > 0:
-                    estimated_total_time = elapsed_time / (progress / 100)
-                    estimated_remaining_time = int(estimated_total_time - elapsed_time)
-                else:
-                    estimated_remaining_time = 0
-                
-                progress_callback({
-                    "progress": progress,
-                    "estimatedTimeRemaining": max(0, estimated_remaining_time)
-                })
-                last_progress_sent = progress
+
+                            crossed = dist < DIST_THRESHOLD and prev_dist > DIST_THRESHOLD
+
+                            if crossed and obj_id not in counted_ids_per_line[name]:
+                                counted_ids_per_line[name].add(obj_id)
+                                counts[name] += 1
+
+                                # Verificar si está entrando desde afuera (para conteo total)
+                                if is_entering_from_outside(name, prev_pos, (cx, cy), line):
+                                    entry_counted_ids.add(obj_id)
+                                    print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (ENTRADA desde afuera)')
+
+                                    # Count detected class only for vehicles entering from outside
+                                    if obj_id not in detected_classes:
+                                        detected_classes[obj_id] = class_name
+                                else:
+                                    print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (interno, no cuenta para total)')
+
+                                # Registrar el cruce con timestamp
+                                if obj_id not in crossed_lines_by_id:
+                                    crossed_lines_by_id[obj_id] = []
+                                    crossing_timestamps[obj_id] = []
+
+                                if name not in [crossing[0] for crossing in crossing_timestamps[obj_id]]:
+                                    current_time = time.time()
+                                    crossed_lines_by_id[obj_id].append(name)
+                                    crossing_timestamps[obj_id].append((name, current_time))
+
+                                # Detectar giro cuando haya al menos 2 cruces y no se haya clasificado aún
+                                if len(crossing_timestamps[obj_id]) >= 2 and obj_id not in turn_types_by_id:
+                                    turn_type = classify_turn_from_lines(crossing_timestamps[obj_id])
+                                    if turn_type != 'invalid' and turn_type != 'unknown':
+                                        turn_types_by_id[obj_id] = turn_type
+                                        from_line = crossing_timestamps[obj_id][0][0]
+                                        to_line = crossing_timestamps[obj_id][-1][0]
+                                        print(f'↪ ID {obj_id} ({class_name}) hizo un giro {turn_type}: {from_line} -> {to_line}')
+
+                    prev_centroids[obj_id] = (cx, cy)
+
+            # Handle missing detections with track interpolation
+            # Clean up old tracks to prevent memory buildup
+            if current_frame % 30 == 0:  # Every 30 frames
+                track_interpolator.cleanup_old_tracks(current_frame, max_age=150)
+
+            # Add visualizations if generating output video
+            if generate_video_output and video_writer:
+                # Draw detection boxes and tracking
+                if results[0].boxes.id is not None:
+                    ids = results[0].boxes.id.cpu().numpy()
+                    boxes = results[0].boxes.xyxy.cpu().numpy()
+
+                    for i, box in enumerate(boxes):
+                        obj_id = int(ids[i])
+                        x1, y1, x2, y2 = box
+                        cx, cy = get_centroid(box)
+
+                        # Draw bounding box
+                        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+
+                        # Draw centroid
+                        cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
+
+                        # Draw ID and turn type if available
+                        label = f'ID {obj_id}'
+                        if obj_id in turn_types_by_id:
+                            label += f' | {turn_types_by_id[obj_id]}'
+                        cv2.putText(frame, label, (cx, cy - 10),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+
+                # Draw lines
+                for line in LINES:
+                    name = line["name"]
+                    x1, y1 = line["pt1"]
+                    x2, y2 = line["pt2"]
+                    cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
+
+                    # Draw line label and count
+                    mid_x, mid_y = (x1 + x2) // 2, (y1 + y2) // 2
+                    cv2.putText(frame, f'{name}: {counts[name]}', (mid_x, mid_y - 10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+                # Draw summary stats
+                total_current = sum(counts.values())
+                turn_summary = dict(Counter(turn_types_by_id.values()))
+                y_pos = 30
+                cv2.putText(frame, f'Total Crossings: {total_current}', (20, y_pos),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+
+                for turn_type, count in turn_summary.items():
+                    y_pos += 25
+                    cv2.putText(frame, f'{turn_type}: {count}', (20, y_pos),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+                # Resize frame if needed for compression
+                if width != int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or height != int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)):
+                    frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+
+                # Write frame to output video
+                video_writer.write(frame)
+
+            # Update minute tracker with vehicle detections that have complete movement data
+            if minute_tracker:
+                # Process vehicles that have completed their movement (have both origin and turn data)
+                for vehicle_id in turn_types_by_id:
+                    # Only process if vehicle has crossed lines and we know its movement
+                    if vehicle_id in crossing_timestamps and len(crossing_timestamps[vehicle_id]) >= 2:
+                        # Only process vehicles that entered from outside (to match final results)
+                        if vehicle_id in entry_counted_ids:
+                            # Only process each vehicle once for minute tracking
+                            if vehicle_id not in minute_processed_vehicles:
+                                minute_processed_vehicles.add(vehicle_id)
+
+                                # Get vehicle class (use detected_classes for consistency with final results)
+                                vehicle_class = detected_classes.get(vehicle_id, 'unknown')
+
+                                # Get origin direction (first line crossed)
+                                origin_direction = crossing_timestamps[vehicle_id][0][0].upper()
+
+                                # Get turn type
+                                turn_type = turn_types_by_id[vehicle_id]
+
+                                # Process this vehicle detection
+                                minute_tracker.process_vehicle_detection(
+                                    current_frame,
+                                    vehicle_id,
+                                    vehicle_class,
+                                    origin_direction,
+                                    turn_type
+                                )
+
+            # Progress tracking
+            current_frame += 1
+            frames_processed_total += 1  # Track actual frames processed (same as current_frame in normal mode)
+            calculate_and_send_progress()
+
+    # Send final 100% progress
+    if progress_callback:
+        progress_callback({
+            "progress": 100,
+            "estimatedTimeRemaining": 0
+        })
+        print(f"✅ TMC Processing complete: {frames_processed_total} frames processed")
 
     cap.release()
     if video_writer:

@@ -198,6 +198,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     last_progress_sent = -1
     start_time = time.time()
 
+    # Progress tracking: frames actually processed (not just video position)
+    frames_processed_total = 0
+
     # Calculate frame ranges from trim periods
     frame_ranges = []
     if trim_periods:
@@ -210,7 +213,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             print("⚠️ No valid frame ranges, processing entire video")
     else:
         print("📊 ATR: No trimming specified, processing entire video")
-    
+
+    # Calculate total_processing_frames for normal mode too (for unified progress calculation)
+    if not frame_ranges:
+        total_processing_frames = total_frames
+
     # Initialize minute tracker if callback provided
     minute_tracker = None
     if video_uuid and minute_batch_callback:
@@ -296,6 +303,60 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         tracker = CentroidTracker(max_disappeared=15)
         print("🔄 ATR CentroidTracker reset - previous tracking state cleared")
 
+    # Helper function for progress calculation
+    def calculate_and_send_progress():
+        """
+        Calculate progress based on actual frames processed (trimming-aware).
+
+        For trimmed videos:
+            progress = frames_processed_total / total_processing_frames
+        For normal videos:
+            progress = frame_count / total_frames (backward compatible)
+
+        Ensures progress never decreases and respects 5% threshold.
+        """
+        nonlocal last_progress_sent
+
+        if not progress_callback or total_frames == 0:
+            return
+
+        # Calculate progress based on mode
+        if frame_ranges:
+            # TRIMMING MODE: Use frames actually processed
+            if total_processing_frames > 0:
+                progress = int((frames_processed_total / total_processing_frames) * 100)
+            else:
+                progress = 0
+        else:
+            # NORMAL MODE: Use video position (backward compatible)
+            progress = int((frame_count / total_frames) * 100)
+
+        # Ensure progress never exceeds 100% or decreases
+        progress = min(100, max(0, progress))
+
+        # Send progress every 5%
+        if progress >= last_progress_sent + 5 and progress < 100:
+            elapsed_time = time.time() - start_time
+
+            # Calculate time estimate
+            if progress > 0:
+                if frame_ranges and total_processing_frames > 0:
+                    # TRIMMING MODE: Estimate based on frames processed, not video position
+                    estimated_total_time = elapsed_time / (frames_processed_total / total_processing_frames)
+                else:
+                    # NORMAL MODE: Use progress percentage
+                    estimated_total_time = elapsed_time / (progress / 100)
+
+                estimated_remaining_time = int(estimated_total_time - elapsed_time)
+            else:
+                estimated_remaining_time = 0
+
+            progress_callback({
+                "progress": progress,
+                "estimatedTimeRemaining": max(0, estimated_remaining_time)
+            })
+            last_progress_sent = progress
+
     # Main processing logic with frame-skipping support
     if frame_ranges:
         # TRIMMING MODE: Process only specified periods with frame-skipping
@@ -344,27 +405,6 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 if not ret:
                     print(f"⚠️ Video ended at frame {frame_count} during period {period_idx + 1}")
                     break
-
-                frame_count += 1
-
-                # Progress tracking (send every 5% like TMC)
-                if progress_callback and total_frames > 0:
-                    progress = int((frame_count / total_frames) * 100)
-
-                    # Send progress every 5%
-                    if progress >= last_progress_sent + 5 and progress < 100:
-                        elapsed_time = time.time() - start_time
-                        if progress > 0:
-                            estimated_total_time = elapsed_time / (progress / 100)
-                            estimated_remaining_time = int(estimated_total_time - elapsed_time)
-                        else:
-                            estimated_remaining_time = 0
-
-                        progress_callback({
-                            "progress": progress,
-                            "estimatedTimeRemaining": max(0, estimated_remaining_time)
-                        })
-                        last_progress_sent = progress
 
                 # YOLO detection
                 results = model.predict(frame, conf=CONF_THRESHOLD)
@@ -527,6 +567,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     # Write frame to output video
                     video_writer.write(frame)
 
+                # Progress tracking (after successful processing)
+                frame_count += 1
+                frames_processed_total += 1  # Track actual frames processed
+                calculate_and_send_progress()
+
                 # Small delay to stabilize tracking (similar to cv2.waitKey in example.py)
                 time.sleep(0.001)  # 1ms delay to prevent too rapid processing
 
@@ -543,27 +588,6 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             ret, frame = cap.read()
             if not ret:
                 break
-
-            frame_count += 1
-
-            # Progress tracking (send every 5% like TMC)
-            if progress_callback and total_frames > 0:
-                progress = int((frame_count / total_frames) * 100)
-
-                # Send progress every 5%
-                if progress >= last_progress_sent + 5 and progress < 100:
-                    elapsed_time = time.time() - start_time
-                    if progress > 0:
-                        estimated_total_time = elapsed_time / (progress / 100)
-                        estimated_remaining_time = int(estimated_total_time - elapsed_time)
-                    else:
-                        estimated_remaining_time = 0
-
-                    progress_callback({
-                        "progress": progress,
-                        "estimatedTimeRemaining": max(0, estimated_remaining_time)
-                    })
-                    last_progress_sent = progress
 
             # YOLO detection
             results = model.predict(frame, conf=CONF_THRESHOLD)
@@ -726,9 +750,22 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 # Write frame to output video
                 video_writer.write(frame)
 
+            # Progress tracking (after successful processing)
+            frame_count += 1
+            frames_processed_total += 1  # Track actual frames processed (same as frame_count in normal mode)
+            calculate_and_send_progress()
+
             # Small delay to stabilize tracking (similar to cv2.waitKey in example.py)
             time.sleep(0.001)  # 1ms delay to prevent too rapid processing
-    
+
+    # Send final 100% progress
+    if progress_callback:
+        progress_callback({
+            "progress": 100,
+            "estimatedTimeRemaining": 0
+        })
+        print(f"✅ ATR Processing complete: {frames_processed_total} frames processed")
+
     cap.release()
     if video_writer:
         video_writer.release()
