@@ -521,11 +521,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     for i, box in enumerate(boxes):
                         obj_id = int(ids[i])
                         class_id = int(classes[i])
-                        class_name = model.names[class_id]
+                        # Use persistent class: first detection wins (prevents class flip-flopping)
+                        class_name = class_counts_by_id.get(obj_id, model.names[class_id])
                         cx, cy = get_centroid(box)
 
-                        # Store class for this object ID
-                        class_counts_by_id[obj_id] = class_name
+                        # Store class for this object ID (only if not already stored)
+                        if obj_id not in class_counts_by_id:
+                            class_counts_by_id[obj_id] = class_name
 
                         # Update track interpolator
                         track_interpolator.update_track(obj_id, (cx, cy), current_frame)
@@ -549,15 +551,18 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                     counts[name] += 1
 
                                     # Verificar si está entrando desde afuera (para conteo total)
-                                    if is_entering_from_outside(name, prev_pos, (cx, cy), line):
+                                    # CRITICAL: Only count as entry if NOT already counted (prevents duplicate counting)
+                                    if obj_id not in entry_counted_ids and is_entering_from_outside(name, prev_pos, (cx, cy), line):
                                         entry_counted_ids.add(obj_id)
-                                        print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (ENTRADA desde afuera)')
+                                        # Detection logging removed for cleaner logs
+                                        # print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (ENTRADA desde afuera)')
 
                                         # Count detected class only for vehicles entering from outside
                                         if obj_id not in detected_classes:
                                             detected_classes[obj_id] = class_name
                                     else:
-                                        print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (interno, no cuenta para total)')
+                                        pass  # Internal crossing or already counted - don't log
+                                        # print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (interno, no cuenta para total)')
 
                                     # Registrar el cruce con timestamp
                                     if obj_id not in crossed_lines_by_id:
@@ -723,11 +728,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                 for i, box in enumerate(boxes):
                     obj_id = int(ids[i])
                     class_id = int(classes[i])
-                    class_name = model.names[class_id]
+                    # Use persistent class: first detection wins (prevents class flip-flopping)
+                    class_name = class_counts_by_id.get(obj_id, model.names[class_id])
                     cx, cy = get_centroid(box)
 
-                    # Store class for this object ID
-                    class_counts_by_id[obj_id] = class_name
+                    # Store class for this object ID (only if not already stored)
+                    if obj_id not in class_counts_by_id:
+                        class_counts_by_id[obj_id] = class_name
 
                     # Update track interpolator
                     track_interpolator.update_track(obj_id, (cx, cy), current_frame)
@@ -751,7 +758,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                 counts[name] += 1
 
                                 # Verificar si está entrando desde afuera (para conteo total)
-                                if is_entering_from_outside(name, prev_pos, (cx, cy), line):
+                                # CRITICAL: Only count as entry if NOT already counted (prevents duplicate counting)
+                                if obj_id not in entry_counted_ids and is_entering_from_outside(name, prev_pos, (cx, cy), line):
                                     entry_counted_ids.add(obj_id)
                                     # Detection logging removed for cleaner logs
                                     # print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (ENTRADA desde afuera)')
@@ -760,7 +768,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                     if obj_id not in detected_classes:
                                         detected_classes[obj_id] = class_name
                                 else:
-                                    pass  # Internal crossing - don't log
+                                    pass  # Internal crossing or already counted - don't log
                                     # print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (interno, no cuenta para total)')
 
                                 # Registrar el cruce con timestamp

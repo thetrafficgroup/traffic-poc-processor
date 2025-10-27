@@ -471,7 +471,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             if len(detection_data) > 4:  # Has class_name
                                 class_name = detection_data[4]
                             break
-                    class_counts_by_id[objectID] = class_name
+
+                    # Use persistent class: first detection wins (prevents class flip-flopping)
+                    class_name = class_counts_by_id.get(objectID, class_name)
+                    # Store class for this object ID (only if not already stored)
+                    if objectID not in class_counts_by_id:
+                        class_counts_by_id[objectID] = class_name
 
                     # Find which lane the object is in using wheels-priority approach
                     wheels_x, wheels_y = None, None
@@ -658,7 +663,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         if len(detection_data) > 4:  # Has class_name
                             class_name = detection_data[4]
                         break
-                class_counts_by_id[objectID] = class_name
+
+                # Use persistent class: first detection wins (prevents class flip-flopping)
+                class_name = class_counts_by_id.get(objectID, class_name)
+                # Store class for this object ID (only if not already stored)
+                if objectID not in class_counts_by_id:
+                    class_counts_by_id[objectID] = class_name
 
                 # Find which lane the object is in using wheels-priority approach
                 wheels_x, wheels_y = None, None
