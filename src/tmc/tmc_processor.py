@@ -462,6 +462,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             print("🧹 Previous centroids cleared for new period")
 
             # Skip frames until we reach the start of this period (frame-skipping)
+            ret = True  # Initialize to True - if no seeking needed, we're ready to process
             while current_frame < start_frame:
                 ret, _ = cap.read()  # Read but don't process
                 if not ret:
@@ -575,7 +576,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                             turn_types_by_id[obj_id] = turn_type
                                             from_line = crossing_timestamps[obj_id][0][0]
                                             to_line = crossing_timestamps[obj_id][-1][0]
-                                            print(f'↪ ID {obj_id} ({class_name}) hizo un giro {turn_type}: {from_line} -> {to_line}')
+                                            # Turn logging removed for cleaner logs
+                                            # print(f'↪ ID {obj_id} ({class_name}) hizo un giro {turn_type}: {from_line} -> {to_line}')
 
                         prev_centroids[obj_id] = (cx, cy)
 
@@ -751,13 +753,15 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                 # Verificar si está entrando desde afuera (para conteo total)
                                 if is_entering_from_outside(name, prev_pos, (cx, cy), line):
                                     entry_counted_ids.add(obj_id)
-                                    print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (ENTRADA desde afuera)')
+                                    # Detection logging removed for cleaner logs
+                                    # print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (ENTRADA desde afuera)')
 
                                     # Count detected class only for vehicles entering from outside
                                     if obj_id not in detected_classes:
                                         detected_classes[obj_id] = class_name
                                 else:
-                                    print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (interno, no cuenta para total)')
+                                    pass  # Internal crossing - don't log
+                                    # print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (interno, no cuenta para total)')
 
                                 # Registrar el cruce con timestamp
                                 if obj_id not in crossed_lines_by_id:
@@ -776,7 +780,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                         turn_types_by_id[obj_id] = turn_type
                                         from_line = crossing_timestamps[obj_id][0][0]
                                         to_line = crossing_timestamps[obj_id][-1][0]
-                                        print(f'↪ ID {obj_id} ({class_name}) hizo un giro {turn_type}: {from_line} -> {to_line}')
+                                        # Turn logging removed for cleaner logs
+                                        # print(f'↪ ID {obj_id} ({class_name}) hizo un giro {turn_type}: {from_line} -> {to_line}')
 
                     prev_centroids[obj_id] = (cx, cy)
 

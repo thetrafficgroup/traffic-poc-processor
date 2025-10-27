@@ -526,7 +526,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             if minute_tracker:
                                 minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
 
-                            print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
+                            # Detection logging removed for cleaner logs
+                            # print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
 
                 # Add visualizations if generating output video
                 if generate_video_output and video_writer:
