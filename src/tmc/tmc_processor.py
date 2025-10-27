@@ -338,15 +338,26 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     
     # Helper function to send seeking progress
     def send_seeking_progress():
+        """
+        Send progress during seeking phase.
+        For trimming mode: Always send 0% to avoid oscillation when processing starts.
+        For normal mode: Send actual position (backward compatible).
+        """
         if progress_callback:
             elapsed_time = time.time() - start_time
-            # During seeking, we can't accurately estimate time remaining
-            # Just show that we're seeking
+            # For trimming: don't show seeking progress to avoid oscillation
+            # Seeking is fast and doesn't count as actual work
+            if frame_ranges:
+                seek_progress = 0  # Always 0% during seeking in trimming mode
+            else:
+                seek_progress = int((current_frame / total_frames) * 100)
+
             progress_callback({
-                "progress": int((current_frame / total_frames) * 100),
+                "progress": seek_progress,
                 "estimatedTimeRemaining": 0,
                 "status": "seeking"
             })
+            print(f"⏩ SEEKING: Frame {current_frame}/{total_frames} (showing {seek_progress}% to user)")
 
     # Helper function to reset tracker state
     def reset_tracker():
@@ -388,6 +399,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         # Ensure progress never exceeds 100% or decreases
         progress = min(100, max(0, progress))
 
+        # CRITICAL: Prevent progress from going backwards
+        if progress < last_progress_sent:
+            print(f"⚠️  PROGRESS BACKWARDS PREVENTED: {progress}% < {last_progress_sent}% (frames_processed={frames_processed_total}, current_frame={current_frame})")
+            return  # Don't send backwards progress
+
         # Send progress every 5%
         if progress >= last_progress_sent + 5 and progress < 100:
             elapsed_time = time.time() - start_time
@@ -405,6 +421,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             else:
                 estimated_remaining_time = 0
 
+            # Debug logging
+            mode = "TRIM" if frame_ranges else "NORMAL"
+            print(f"📊 PROGRESS UPDATE [{mode}]: {progress}% | Elapsed: {elapsed_time:.1f}s | ETA: {estimated_remaining_time}s ({estimated_remaining_time/60:.1f} min)")
+            if frame_ranges:
+                print(f"   └─ Frames: {frames_processed_total}/{total_processing_frames} processed | Current position: {current_frame}/{total_frames}")
+            else:
+                print(f"   └─ Frames: {current_frame}/{total_frames}")
+
             progress_callback({
                 "progress": progress,
                 "estimatedTimeRemaining": max(0, estimated_remaining_time)
@@ -415,6 +439,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     if frame_ranges:
         # TRIMMING MODE: Process only specified periods with frame-skipping
         print("🎬 Starting trimmed video processing")
+        print(f"📊 PROGRESS TRACKING CONFIG:")
+        print(f"   └─ Total video frames: {total_frames}")
+        print(f"   └─ Frames to process: {total_processing_frames}")
+        print(f"   └─ Trim coverage: {total_processing_frames/total_frames*100:.1f}%")
+        print(f"   └─ Progress calculation: frames_processed_total / {total_processing_frames}")
 
         for period_idx, period in enumerate(frame_ranges):
             start_frame = period["start_frame"]
@@ -461,7 +490,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
                 # YOLO processing (existing logic)
                 results = model.track(
-                    frame, persist=True, conf=CONF_THRESHOLD, imgsz=IMG_SIZE, iou=IOU_THRESHOLD
+                    frame, persist=True, conf=CONF_THRESHOLD, imgsz=IMG_SIZE, iou=IOU_THRESHOLD, verbose=False
                 )
 
                 # Process detections (rest of existing logic)
@@ -653,6 +682,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     else:
         # NORMAL MODE: Process entire video (existing logic)
         print("📊 Processing entire video (no trimming)")
+        print(f"📊 PROGRESS TRACKING CONFIG:")
+        print(f"   └─ Total frames: {total_frames}")
+        print(f"   └─ Progress calculation: current_frame / {total_frames}")
 
         while cap.isOpened():
             ret, frame = cap.read()
@@ -660,7 +692,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                 break
 
             results = model.track(
-                frame, persist=True, conf=CONF_THRESHOLD, imgsz=IMG_SIZE, iou=IOU_THRESHOLD
+                frame, persist=True, conf=CONF_THRESHOLD, imgsz=IMG_SIZE, iou=IOU_THRESHOLD, verbose=False
             )
 
             if results[0].boxes.id is not None:
