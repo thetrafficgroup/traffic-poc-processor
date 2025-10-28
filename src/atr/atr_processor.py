@@ -305,7 +305,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 "estimatedTimeRemaining": 0,
                 "status": "seeking"
             })
-            print(f"⏩ SEEKING: Frame {frame_count}/{total_frames} (showing {seek_progress}% to user)")
+            # Only log at major seeking milestones to reduce log noise
+            if frame_ranges:
+                # For trimming: calculate seeking progress for logging
+                start_frame = frame_ranges[0][0]
+                seek_pct = int((frame_count / start_frame) * 100) if start_frame > 0 else 0
+                if seek_pct in [25, 50, 75] or frame_count >= start_frame - 1000:
+                    print(f"⏩ SEEKING: Frame {frame_count}/{total_frames} ({seek_pct}% of seeking phase)")
+            else:
+                # For normal mode: log every 25%
+                if seek_progress % 25 == 0 and seek_progress > 0:
+                    print(f"⏩ SEEKING: Frame {frame_count}/{total_frames} (showing {seek_progress}% to user)")
 
     # Helper function to reset tracker state
     def reset_centroid_tracker():
@@ -350,8 +360,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             print(f"⚠️  PROGRESS BACKWARDS PREVENTED: {progress}% < {last_progress_sent}% (frames_processed={frames_processed_total}, frame_count={frame_count})")
             return  # Don't send backwards progress
 
-        # Send progress every 5%
-        if progress >= last_progress_sent + 5 and progress < 100:
+        # Send progress every 1%
+        if progress >= last_progress_sent + 1 and progress < 100:
             elapsed_time = time.time() - start_time
 
             # Calculate time estimate
