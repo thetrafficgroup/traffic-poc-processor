@@ -308,7 +308,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             # Only log at major seeking milestones to reduce log noise
             if frame_ranges:
                 # For trimming: calculate seeking progress for logging
-                start_frame = frame_ranges[0][0]
+                start_frame = frame_ranges[0]["start_frame"]
                 seek_pct = int((frame_count / start_frame) * 100) if start_frame > 0 else 0
                 if seek_pct in [25, 50, 75] or frame_count >= start_frame - 1000:
                     print(f"⏩ SEEKING: Frame {frame_count}/{total_frames} ({seek_pct}% of seeking phase)")
@@ -733,7 +733,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         if minute_tracker:
                             minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
 
-                        print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
+                        # Detection logging removed for cleaner logs
+                        # print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
 
             # Add visualizations if generating output video
             if generate_video_output and video_writer:
