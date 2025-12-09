@@ -92,7 +92,9 @@ def local_test_handler(event):
     print(f"🎥 Video Output: {'Enabled' if generate_video_output else 'Disabled'}")
 
     print("⬇️ Descargando archivos...")
-    video_path = download_s3_file(bucket, video_key, "video.mp4")
+    # Use video_uuid to create unique filenames for parallel processing
+    video_path = download_s3_file(bucket, video_key, f"video_{video_uuid}.mp4")
+    # Model can use same filename - it's identical for all jobs and should be cached
     model_path = download_s3_file(bucket, model_key, "best.pt")
 
     def progress_callback(progress_data):

@@ -16,7 +16,10 @@ def handler(event):
     generate_video_output = event["input"].get("generate_video_output", False)  # Default to False
     trim_periods = event["input"].get("trim_periods", None)  # Optional trimming periods
 
-    video_path = download_s3_file(bucket, video_key, "video.mp4")
+    # Use video_uuid to create unique filenames for parallel processing
+    # This prevents race conditions where multiple jobs overwrite each other's files
+    video_path = download_s3_file(bucket, video_key, f"video_{video_uuid}.mp4")
+    # Model can use same filename - it's identical for all jobs and should be cached
     model_path = download_s3_file(bucket, model_key, "best.pt")
 
     def progress_callback(progress_data):
