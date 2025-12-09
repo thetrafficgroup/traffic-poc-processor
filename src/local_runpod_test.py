@@ -92,8 +92,9 @@ def local_test_handler(event):
     print(f"🎥 Video Output: {'Enabled' if generate_video_output else 'Disabled'}")
 
     print("⬇️ Descargando archivos...")
-    video_path = download_s3_file(bucket, video_key, "video.mp4")
-    model_path = download_s3_file(bucket, model_key, "best.pt")
+    # Use video_uuid to create unique filenames for parallel processing
+    video_path = download_s3_file(bucket, video_key, f"video_{video_uuid}.mp4")
+    model_path = download_s3_file(bucket, model_key, f"model_{video_uuid}.pt")
 
     def progress_callback(progress_data):
         print(f"📈 Progress: {progress_data['progress']}% | ETA: {progress_data['estimatedTimeRemaining']}s")

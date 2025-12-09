@@ -16,8 +16,10 @@ def handler(event):
     generate_video_output = event["input"].get("generate_video_output", False)  # Default to False
     trim_periods = event["input"].get("trim_periods", None)  # Optional trimming periods
 
-    video_path = download_s3_file(bucket, video_key, "video.mp4")
-    model_path = download_s3_file(bucket, model_key, "best.pt")
+    # Use video_uuid to create unique filenames for parallel processing
+    # This prevents race conditions where multiple jobs overwrite each other's files
+    video_path = download_s3_file(bucket, video_key, f"video_{video_uuid}.mp4")
+    model_path = download_s3_file(bucket, model_key, f"model_{video_uuid}.pt")
 
     def progress_callback(progress_data):
         send_sqs_message(queue_url, {
