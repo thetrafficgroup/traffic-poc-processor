@@ -163,7 +163,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     counts = {line["name"]: 0 for line in LINES}
     counted_ids_per_line = {line["name"]: set() for line in LINES}
     entry_counted_ids = set()  # IDs que entraron desde afuera (para conteo total)
-    prev_centroids = {}
+    prev_centroids = {}  # Stores (cx, cy) for tracking
+    prev_wheels = {}  # Stores (wx, wy) for line crossing
     crossed_lines_by_id = {}
     turn_types_by_id = {}
     crossing_timestamps = {}
@@ -180,6 +181,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     def get_centroid(box):
         x1, y1, x2, y2 = box
         return int((x1 + x2) / 2), int((y1 + y2) / 2)
+
+    def get_wheels_position(box):
+        """Get the wheel position (bottom center) of the bounding box"""
+        x1, y1, x2, y2 = box
+        # Wheels are at the bottom center of the vehicle
+        return int((x1 + x2) / 2), int(y2)
 
     def point_line_distance(px, py, x1, y1, x2, y2):
         # Ensure all coordinates are float for precise calculations
@@ -467,9 +474,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             # CRITICAL: Reset tracker at start of each period
             reset_tracker()
 
-            # Clear previous centroids to prevent cross-period tracking
+            # Clear previous positions to prevent cross-period tracking
             prev_centroids.clear()
-            print("🧹 Previous centroids cleared for new period")
+            prev_wheels.clear()
+            print("🧹 Previous positions cleared for new period")
 
             # Skip frames until we reach the start of this period (frame-skipping)
             ret = True  # Initialize to True - if no seeking needed, we're ready to process
@@ -544,25 +552,39 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         # Use persistent class: first detection wins (prevents class flip-flopping)
                         class_name = class_counts_by_id.get(obj_id, model.names[class_id])
                         cx, cy = get_centroid(box)
+                        wx, wy = get_wheels_position(box)
 
                         # Store class for this object ID (only if not already stored)
                         if obj_id not in class_counts_by_id:
                             class_counts_by_id[obj_id] = class_name
 
-                        # Update track interpolator
+                        # Update track interpolator (use centroid for tracking)
                         track_interpolator.update_track(obj_id, (cx, cy), current_frame)
 
-                        prev_pos = prev_centroids.get(obj_id)
-                        if prev_pos:
+                        # Get previous positions (wheels for line crossing, centroid for direction)
+                        prev_wheels_pos = prev_wheels.get(obj_id)
+                        prev_centroid_pos = prev_centroids.get(obj_id)
+
+                        if prev_wheels_pos and prev_centroid_pos:
                             for line in LINES:
                                 name = line["name"]
                                 x1, y1 = line["pt1"]
                                 x2, y2 = line["pt2"]
 
-                                dist = point_line_distance(cx, cy, x1, y1, x2, y2)
+                                # Use wheels position with centroid fallback for line crossing detection
+                                # Priority 1: Try wheels position
+                                dist = point_line_distance(wx, wy, x1, y1, x2, y2)
                                 prev_dist = point_line_distance(
-                                    prev_pos[0], prev_pos[1], x1, y1, x2, y2
+                                    prev_wheels_pos[0], prev_wheels_pos[1], x1, y1, x2, y2
                                 )
+
+                                # If wheels are too far from line, fallback to centroid
+                                if dist > DIST_THRESHOLD * 2:  # Wheels not near line
+                                    dist = point_line_distance(cx, cy, x1, y1, x2, y2)
+                                if prev_dist > DIST_THRESHOLD * 2:  # Previous wheels not near line
+                                    prev_dist = point_line_distance(
+                                        prev_centroid_pos[0], prev_centroid_pos[1], x1, y1, x2, y2
+                                    )
 
                                 crossed = dist < DIST_THRESHOLD and prev_dist > DIST_THRESHOLD
 
@@ -571,8 +593,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                     counts[name] += 1
 
                                     # Verificar si está entrando desde afuera (para conteo total)
+                                    # Use centroid for direction detection (is_entering_from_outside)
                                     # CRITICAL: Only count as entry if NOT already counted (prevents duplicate counting)
-                                    if obj_id not in entry_counted_ids and is_entering_from_outside(name, prev_pos, (cx, cy), line):
+                                    if obj_id not in entry_counted_ids and is_entering_from_outside(name, prev_centroid_pos, (cx, cy), line):
                                         entry_counted_ids.add(obj_id)
                                         # Detection logging removed for cleaner logs
                                         # print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (ENTRADA desde afuera)')
@@ -605,6 +628,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                             # print(f'↪ ID {obj_id} ({class_name}) hizo un giro {turn_type}: {from_line} -> {to_line}')
 
                         prev_centroids[obj_id] = (cx, cy)
+                        prev_wheels[obj_id] = (wx, wy)
 
                 # Handle missing detections with track interpolation
                 # Clean up old tracks to prevent memory buildup
@@ -761,25 +785,39 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     # Use persistent class: first detection wins (prevents class flip-flopping)
                     class_name = class_counts_by_id.get(obj_id, model.names[class_id])
                     cx, cy = get_centroid(box)
+                    wx, wy = get_wheels_position(box)
 
                     # Store class for this object ID (only if not already stored)
                     if obj_id not in class_counts_by_id:
                         class_counts_by_id[obj_id] = class_name
 
-                    # Update track interpolator
+                    # Update track interpolator (use centroid for tracking)
                     track_interpolator.update_track(obj_id, (cx, cy), current_frame)
 
-                    prev_pos = prev_centroids.get(obj_id)
-                    if prev_pos:
+                    # Get previous positions (wheels for line crossing, centroid for direction)
+                    prev_wheels_pos = prev_wheels.get(obj_id)
+                    prev_centroid_pos = prev_centroids.get(obj_id)
+
+                    if prev_wheels_pos and prev_centroid_pos:
                         for line in LINES:
                             name = line["name"]
                             x1, y1 = line["pt1"]
                             x2, y2 = line["pt2"]
 
-                            dist = point_line_distance(cx, cy, x1, y1, x2, y2)
+                            # Use wheels position with centroid fallback for line crossing detection
+                            # Priority 1: Try wheels position
+                            dist = point_line_distance(wx, wy, x1, y1, x2, y2)
                             prev_dist = point_line_distance(
-                                prev_pos[0], prev_pos[1], x1, y1, x2, y2
+                                prev_wheels_pos[0], prev_wheels_pos[1], x1, y1, x2, y2
                             )
+
+                            # If wheels are too far from line, fallback to centroid
+                            if dist > DIST_THRESHOLD * 2:  # Wheels not near line
+                                dist = point_line_distance(cx, cy, x1, y1, x2, y2)
+                            if prev_dist > DIST_THRESHOLD * 2:  # Previous wheels not near line
+                                prev_dist = point_line_distance(
+                                    prev_centroid_pos[0], prev_centroid_pos[1], x1, y1, x2, y2
+                                )
 
                             crossed = dist < DIST_THRESHOLD and prev_dist > DIST_THRESHOLD
 
@@ -788,8 +826,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                 counts[name] += 1
 
                                 # Verificar si está entrando desde afuera (para conteo total)
+                                # Use centroid for direction detection (is_entering_from_outside)
                                 # CRITICAL: Only count as entry if NOT already counted (prevents duplicate counting)
-                                if obj_id not in entry_counted_ids and is_entering_from_outside(name, prev_pos, (cx, cy), line):
+                                if obj_id not in entry_counted_ids and is_entering_from_outside(name, prev_centroid_pos, (cx, cy), line):
                                     entry_counted_ids.add(obj_id)
                                     # Detection logging removed for cleaner logs
                                     # print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (ENTRADA desde afuera)')
@@ -822,6 +861,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                         # print(f'↪ ID {obj_id} ({class_name}) hizo un giro {turn_type}: {from_line} -> {to_line}')
 
                     prev_centroids[obj_id] = (cx, cy)
+                    prev_wheels[obj_id] = (wx, wy)
 
             # Handle missing detections with track interpolation
             # Clean up old tracks to prevent memory buildup
