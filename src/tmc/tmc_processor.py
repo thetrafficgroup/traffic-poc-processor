@@ -142,7 +142,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             print("⚠️ Falling back to processing entire video")
             trim_periods = None
 
+    # Initialize video capture
+    cap = cv2.VideoCapture(VIDEO_PATH)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
+    # Load YOLO model
     model = YOLO(MODEL_PATH)
+    print(f"✅ YOLO model loaded: {MODEL_PATH}")
 
     raw_lines = LINES_DATA
 
@@ -245,9 +252,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
         return transitions.get((from_dir, to_dir), 'unknown')
 
-    cap = cv2.VideoCapture(VIDEO_PATH)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
+    # Video capture already initialized above for model manager
     current_frame = 0
     start_time = time.time()
     last_progress_sent = -1
@@ -507,7 +512,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     print(f"⚠️ Video ended at frame {current_frame} during period {period_idx + 1}")
                     break
 
-                # YOLO processing (existing logic)
+                # YOLO tracking
                 results = model.track(
                     frame, persist=True, conf=CONF_THRESHOLD, imgsz=IMG_SIZE, iou=IOU_THRESHOLD, verbose=False
                 )
@@ -742,6 +747,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             if not ret:
                 break
 
+            # YOLO tracking
             results = model.track(
                 frame, persist=True, conf=CONF_THRESHOLD, imgsz=IMG_SIZE, iou=IOU_THRESHOLD, verbose=False
             )
@@ -1023,18 +1029,18 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     if minute_tracker:
         video_duration_seconds = minute_tracker.finalize_processing()
         print(f"📊 Video duration calculated: {video_duration_seconds} seconds")
-    
+
     return {
         # Original fields (backward compatibility)
-        "counts": counts, 
-        "turns": turns_dict, 
+        "counts": counts,
+        "turns": turns_dict,
         "total": total_count,
         "totalcount": total_count,  # Added for clarity
         "detected_classes": dict(class_summary),
-        
+
         # NEW: Analysis grouped by vehicle class first
         "vehicles": vehicles,
-        
+
         "validation": {
             "total_vehicles": total_count,
             "vehicles_with_movement": vehicles_with_movement,
@@ -1043,7 +1049,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             "entry_vehicles": len(entry_counted_ids),
             "total_crossings": sum(counts.values())
         },
-        
+
         # NEW: Overlap detection statistics
         "overlap_analysis": {
             "frames_with_overlaps": overlap_stats["frames_with_overlaps"],
@@ -1058,7 +1064,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                 "optimization_strategy": "skip_low_traffic_and_sample_every_3_frames"
             }
         },
-        
+
         # Video metadata
         "video_metadata": {
             "duration_seconds": video_duration_seconds,

@@ -158,8 +158,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Constants
     CONF_THRESHOLD = 0.1
 
+    # Initialize video capture
+    cap = cv2.VideoCapture(VIDEO_PATH)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
     # Load YOLO model
     model = YOLO(MODEL_PATH)
+    print(f"✅ YOLO model loaded: {MODEL_PATH}")
     
     # Process lanes configuration
     lanes = LINES_DATA["lanes"]
@@ -189,11 +195,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Track raw detection labels by lane (use defaultdict pattern)
     from collections import defaultdict
     vehicle_counts_by_lane = defaultdict(lambda: defaultdict(int))
-    
-    # Initialize video capture
-    cap = cv2.VideoCapture(VIDEO_PATH)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
+
+    # Video capture already initialized above for model manager
     frame_count = 0
     last_progress_sent = -1
     start_time = time.time()
@@ -838,7 +841,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     print(f"[ATR DEBUG] Objects counted: {len(counted_ids)}")
     print(f"[ATR DEBUG] Final lane counts: {lane_counts}")
     print(f"[ATR DEBUG] Total count: {total_count}")
-    
+
     # Convert detected_classes from {obj_id: class_name} to {class_name: count}
     class_summary = Counter(detected_classes.values())
 
