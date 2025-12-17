@@ -16,11 +16,28 @@ def handler(event):
     generate_video_output = event["input"].get("generate_video_output", False)  # Default to False
     trim_periods = event["input"].get("trim_periods", None)  # Optional trimming periods
 
+    # Video start time for adaptive day/night model switching (ISO format datetime string)
+    video_start_time = event["input"].get("video_start_time", None)
+
     # Use video_uuid to create unique filenames for parallel processing
     # This prevents race conditions where multiple jobs overwrite each other's files
     video_path = download_s3_file(bucket, video_key, f"video_{video_uuid}.mp4")
-    # Model can use same filename - it's identical for all jobs and should be cached
+
+    # Download models - day model is required, night model is optional for adaptive switching
     model_path = download_s3_file(bucket, model_key, "best.pt")
+
+    # Night model: use same directory as day model with fixed filename
+    # e.g., if model_key is "models/best.pt", night model is "models/best_night.pt"
+    model_dir = model_key.rsplit('/', 1)[0] if '/' in model_key else ""
+    night_model_key = f"{model_dir}/best_night.pt" if model_dir else "best_night.pt"
+
+    night_model_path = None
+    try:
+        night_model_path = download_s3_file(bucket, night_model_key, "best_night.pt")
+        print(f"🌙 Night model downloaded: {night_model_path}")
+    except Exception as e:
+        print(f"⚠️ Night model not available at {night_model_key}: {e}")
+        print("⚠️ Falling back to day-model-only mode")
 
     def progress_callback(progress_data):
         send_sqs_message(queue_url, {
@@ -63,7 +80,9 @@ def handler(event):
         minute_batch_callback=minute_batch_callback,
         generate_video_output=generate_video_output,
         output_video_path=output_video_path,
-        trim_periods=trim_periods
+        trim_periods=trim_periods,
+        night_model_path=night_model_path,
+        video_start_time=video_start_time
     )
 
     # Upload output video to S3 if generated

@@ -1,6 +1,8 @@
 import cv2
 import json
 import time
+from datetime import datetime
+from typing import Optional
 from collections import Counter
 from ultralytics import YOLO
 import numpy as np
@@ -14,6 +16,7 @@ from utils.overlap_detection import (
 )
 from utils.minute_tracker import MinuteTracker
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
+from utils.model_manager import AdaptiveModelManager
 
 CONF_THRESHOLD = 0.01
 IMG_SIZE = 640
@@ -115,20 +118,22 @@ def is_entering_from_outside(line_name, prev_pos, curr_pos, line_coords):
     return False
 
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None, progress_callback=None, minute_batch_callback=None, generate_video_output=False, output_video_path=None, trim_periods=None):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None, progress_callback=None, minute_batch_callback=None, generate_video_output=False, output_video_path=None, trim_periods=None, night_model_path: Optional[str] = None, video_start_time: Optional[str] = None):
     """
     Process video for TMC (Turning Movement Count) analysis with optional trimming.
 
     Args:
         VIDEO_PATH: Path to video file
         LINES_DATA: Line configuration data
-        MODEL_PATH: Path to YOLO model
+        MODEL_PATH: Path to YOLO model (day model)
         video_uuid: UUID of the video being processed
         progress_callback: Optional callback for progress updates
         minute_batch_callback: Optional callback for minute-by-minute batch data
         generate_video_output: Whether to generate annotated output video
         output_video_path: Path for output video (if generate_video_output=True)
         trim_periods: Optional list of trim periods in seconds [{"start": 3600, "end": 10800}, ...]
+        night_model_path: Optional path to night model for adaptive day/night switching
+        video_start_time: Optional ISO format datetime string for time-based model selection
 
     Returns:
         Dictionary with processing results
@@ -142,7 +147,38 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             print("⚠️ Falling back to processing entire video")
             trim_periods = None
 
-    model = YOLO(MODEL_PATH)
+    # Parse video start time from ISO string if provided
+    parsed_video_start_time = None
+    if video_start_time:
+        try:
+            # Handle various ISO formats
+            if video_start_time.endswith('Z'):
+                video_start_time = video_start_time[:-1] + '+00:00'
+            parsed_video_start_time = datetime.fromisoformat(video_start_time)
+            print(f"🕐 Video start time parsed: {parsed_video_start_time}")
+        except ValueError as e:
+            print(f"⚠️ Could not parse video_start_time '{video_start_time}': {e}")
+            print("⚠️ Falling back to brightness-only model selection")
+
+    # Initialize video capture early to get FPS for model manager
+    cap = cv2.VideoCapture(VIDEO_PATH)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+
+    # Create adaptive model manager for day/night switching
+    model_manager = AdaptiveModelManager(
+        day_model_path=MODEL_PATH,
+        night_model_path=night_model_path,
+        video_start_time=parsed_video_start_time,
+        fps=fps,
+        verbose=True
+    )
+
+    # For compatibility with existing code that expects model.names
+    model = model_manager.day_model  # Reference for class names
+
+    # Track current model type for tracking state management
+    last_model_type = None
 
     raw_lines = LINES_DATA
 
@@ -245,9 +281,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
         return transitions.get((from_dir, to_dir), 'unknown')
 
-    cap = cv2.VideoCapture(VIDEO_PATH)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
+    # Video capture already initialized above for model manager
     current_frame = 0
     start_time = time.time()
     last_progress_sent = -1
@@ -507,8 +541,19 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     print(f"⚠️ Video ended at frame {current_frame} during period {period_idx + 1}")
                     break
 
+                # Get adaptive model (day/night based on time and brightness)
+                current_model = model_manager.get_model_for_frame(frame, current_frame)
+
+                # Check if model changed and reset tracking state if needed
+                current_model_type = model_manager.get_current_model_type()
+                if last_model_type is not None and current_model_type != last_model_type:
+                    # Model switched - tracking state will be reset automatically
+                    # because each model has its own tracker state
+                    print(f"🔄 TMC: Model switched to {current_model_type}, tracker state reset")
+                last_model_type = current_model_type
+
                 # YOLO processing (existing logic)
-                results = model.track(
+                results = current_model.track(
                     frame, persist=True, conf=CONF_THRESHOLD, imgsz=IMG_SIZE, iou=IOU_THRESHOLD, verbose=False
                 )
 
@@ -550,7 +595,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         obj_id = int(ids[i])
                         class_id = int(classes[i])
                         # Use persistent class: first detection wins (prevents class flip-flopping)
-                        class_name = class_counts_by_id.get(obj_id, model.names[class_id])
+                        class_name = class_counts_by_id.get(obj_id, current_model.names[class_id])
                         cx, cy = get_centroid(box)
                         wx, wy = get_wheels_position(box)
 
@@ -742,7 +787,18 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             if not ret:
                 break
 
-            results = model.track(
+            # Get adaptive model (day/night based on time and brightness)
+            current_model = model_manager.get_model_for_frame(frame, current_frame)
+
+            # Check if model changed and reset tracking state if needed
+            current_model_type = model_manager.get_current_model_type()
+            if last_model_type is not None and current_model_type != last_model_type:
+                # Model switched - tracking state will be reset automatically
+                # because each model has its own tracker state
+                print(f"🔄 TMC: Model switched to {current_model_type}, tracker state reset")
+            last_model_type = current_model_type
+
+            results = current_model.track(
                 frame, persist=True, conf=CONF_THRESHOLD, imgsz=IMG_SIZE, iou=IOU_THRESHOLD, verbose=False
             )
 
@@ -783,7 +839,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     obj_id = int(ids[i])
                     class_id = int(classes[i])
                     # Use persistent class: first detection wins (prevents class flip-flopping)
-                    class_name = class_counts_by_id.get(obj_id, model.names[class_id])
+                    class_name = class_counts_by_id.get(obj_id, current_model.names[class_id])
                     cx, cy = get_centroid(box)
                     wx, wy = get_wheels_position(box)
 
@@ -1023,18 +1079,22 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     if minute_tracker:
         video_duration_seconds = minute_tracker.finalize_processing()
         print(f"📊 Video duration calculated: {video_duration_seconds} seconds")
-    
+
+    # Print model manager summary
+    model_manager.print_summary()
+    model_stats = model_manager.get_stats()
+
     return {
         # Original fields (backward compatibility)
-        "counts": counts, 
-        "turns": turns_dict, 
+        "counts": counts,
+        "turns": turns_dict,
         "total": total_count,
         "totalcount": total_count,  # Added for clarity
         "detected_classes": dict(class_summary),
-        
+
         # NEW: Analysis grouped by vehicle class first
         "vehicles": vehicles,
-        
+
         "validation": {
             "total_vehicles": total_count,
             "vehicles_with_movement": vehicles_with_movement,
@@ -1043,7 +1103,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             "entry_vehicles": len(entry_counted_ids),
             "total_crossings": sum(counts.values())
         },
-        
+
         # NEW: Overlap detection statistics
         "overlap_analysis": {
             "frames_with_overlaps": overlap_stats["frames_with_overlaps"],
@@ -1058,11 +1118,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                 "optimization_strategy": "skip_low_traffic_and_sample_every_3_frames"
             }
         },
-        
+
         # Video metadata
         "video_metadata": {
             "duration_seconds": video_duration_seconds,
             "total_frames": current_frame,
             "fps": fps
-        }
+        },
+
+        # Day/night model usage statistics
+        "model_stats": model_stats
     }
