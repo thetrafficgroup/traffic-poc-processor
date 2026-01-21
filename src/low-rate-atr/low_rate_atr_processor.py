@@ -11,6 +11,7 @@ import os
 # Add parent directory to path to access atr module
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from atr.atr_minute_tracker import ATRMinuteTracker
+from utils.vehicle_classifier import classify_articulated_truck
 
 
 def generate_parallel_lines(finish_line, distance=30):
@@ -262,6 +263,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 cls_id = int(box.cls[0])
                 label = model.names[cls_id]
+                label = classify_articulated_truck(label, x1, y1, x2, y2)
                 cx = int((x1 + x2) / 2)
                 cy = int((y1 + y2) / 2)
                 detections.append({

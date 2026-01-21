@@ -14,6 +14,7 @@ from utils.overlap_detection import (
 )
 from utils.minute_tracker import MinuteTracker
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
+from utils.vehicle_classifier import classify_articulated_truck
 
 CONF_THRESHOLD = 0.01
 IMG_SIZE = 640
@@ -561,6 +562,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
                         # Store class for this object ID (only if not already stored)
                         if obj_id not in class_counts_by_id:
+                            # Apply articulated truck classification before storing
+                            x1, y1, x2, y2 = box[:4]
+                            class_name = classify_articulated_truck(class_name, x1, y1, x2, y2)
                             class_counts_by_id[obj_id] = class_name
 
                         # Update track interpolator (use centroid for tracking)
@@ -795,6 +799,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
                     # Store class for this object ID (only if not already stored)
                     if obj_id not in class_counts_by_id:
+                        # Apply articulated truck classification before storing
+                        x1, y1, x2, y2 = box[:4]
+                        class_name = classify_articulated_truck(class_name, x1, y1, x2, y2)
                         class_counts_by_id[obj_id] = class_name
 
                     # Update track interpolator (use centroid for tracking)

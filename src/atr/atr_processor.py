@@ -11,6 +11,7 @@ import os
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
+from utils.vehicle_classifier import classify_articulated_truck
 
 # === Centroid Tracker ===
 class CentroidTracker:
@@ -461,6 +462,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                         class_id = int(box.cls[0].cpu().numpy())
                         class_name = model.names[class_id]
+                        class_name = classify_articulated_truck(class_name, x1, y1, x2, y2)
                         cx, cy = get_centroid((x1, y1, x2, y2))
                         wx, wy = get_wheels_position((x1, y1, x2, y2))
                         input_centroids.append(np.array([cx, cy]))
@@ -653,6 +655,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     class_id = int(box.cls[0].cpu().numpy())
                     class_name = model.names[class_id]
+                    class_name = classify_articulated_truck(class_name, x1, y1, x2, y2)
                     cx, cy = get_centroid((x1, y1, x2, y2))
                     wx, wy = get_wheels_position((x1, y1, x2, y2))
                     input_centroids.append(np.array([cx, cy]))
