@@ -67,6 +67,12 @@ def handler(event):
         trim_periods=trim_periods
     )
 
+    # CRITICAL: Clean up input video file to prevent disk accumulation
+    # RunPod workers are reused, so files accumulate if not deleted
+    if os.path.exists(video_path):
+        os.remove(video_path)
+        print(f"🗑️ Cleaned up input video: {video_path}")
+
     # Upload output video to S3 if generated
     if generate_video_output and output_video_path and os.path.exists(output_video_path):
         print(f"📊 Processing output video for hybrid streaming: {output_video_path}")

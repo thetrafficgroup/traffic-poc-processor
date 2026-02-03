@@ -6,6 +6,8 @@ from ultralytics import YOLO
 import numpy as np
 import sys
 import os
+import torch
+import gc
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from utils.overlap_detection import (
@@ -982,6 +984,15 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     cap.release()
     if video_writer:
         video_writer.release()
+
+    # CRITICAL: Release YOLO model and GPU memory to prevent accumulation
+    # RunPod workers are reused, so memory accumulates if not released
+    print("🧹 Releasing YOLO model and GPU memory...")
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print("✅ GPU memory cache cleared")
 
     # Post procesamiento con lógica corregida
     # Usar entry_counted_ids para el conteo total (solo vehículos que entraron desde afuera)
