@@ -1,11 +1,18 @@
 import os
+import traceback
 import runpod
+import boto3
 from app import process_video
 from aws_utils import download_s3_file, send_sqs_message, upload_s3_file
 from response_normalizer import normalize_response
+from log_capture import LogCapture, upload_log_to_s3
+
+# S3 client for log uploads
+s3_client = boto3.client("s3")
+
 
 def handler(event):
-    print("🚀 HANDLER STARTED with event: ", event)  # DEBUG
+    # Extract parameters first (before log capture starts)
     bucket = event["input"]["s3_bucket"]
     video_key = event["input"]["video_key"]
     video_uuid = event["input"]["video_uuid"]
@@ -15,6 +22,46 @@ def handler(event):
     study_type = event["input"].get("study_type", "TMC")  # Default to TMC
     generate_video_output = event["input"].get("generate_video_output", False)  # Default to False
     trim_periods = event["input"].get("trim_periods", None)  # Optional trimming periods
+
+    # Start log capture - all print statements will be captured and uploaded to S3
+    log_capture = LogCapture(video_uuid, study_type)
+    result = None
+    caught_error = None
+
+    try:
+        with log_capture:
+            try:
+                result = _process_video_job(
+                    event, bucket, video_key, video_uuid, lines_data, model_key,
+                    queue_url, study_type, generate_video_output, trim_periods
+                )
+            except Exception as e:
+                # Log the error before it propagates
+                print(f"❌ ERROR: {type(e).__name__}: {e}")
+                print(f"❌ TRACEBACK:\n{traceback.format_exc()}")
+                caught_error = e
+    finally:
+        # Upload log to S3 AFTER context manager exits (so footer is included)
+        # This runs even if an exception occurred
+        try:
+            log_key = upload_log_to_s3(log_capture, bucket, s3_client)
+            if log_key:
+                print(f"📋 Log uploaded to S3: s3://{bucket}/{log_key}")
+        except Exception as upload_error:
+            # Don't let log upload failure mask the original error
+            print(f"⚠️ Failed to upload log: {upload_error}")
+
+    # Re-raise original error if one occurred
+    if caught_error:
+        raise caught_error
+
+    return result
+
+
+def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_key,
+                       queue_url, study_type, generate_video_output, trim_periods):
+    """Main video processing logic, separated for cleaner log capture."""
+    print("🚀 HANDLER STARTED with event: ", event)  # DEBUG
 
     # Use video_uuid to create unique filenames for parallel processing
     # This prevents race conditions where multiple jobs overwrite each other's files
@@ -66,6 +113,12 @@ def handler(event):
         output_video_path=output_video_path,
         trim_periods=trim_periods
     )
+
+    # CRITICAL: Clean up input video file to prevent disk accumulation
+    # RunPod workers are reused, so files accumulate if not deleted
+    if os.path.exists(video_path):
+        os.remove(video_path)
+        print(f"🗑️ Cleaned up input video: {video_path}")
 
     # Upload output video to S3 if generated
     if generate_video_output and output_video_path and os.path.exists(output_video_path):
@@ -301,5 +354,9 @@ def handler(event):
     send_sqs_message(queue_url, completion_message)
 
     print("✅ Handler completed successfully.")
+
+    # Return results for RunPod
+    return {"status": "completed", "video_uuid": video_uuid}
+
 
 runpod.serverless.start({"handler": handler})

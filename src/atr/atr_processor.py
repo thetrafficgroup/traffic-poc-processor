@@ -8,6 +8,8 @@ from collections import OrderedDict, Counter
 from .atr_minute_tracker import ATRMinuteTracker
 import sys
 import os
+import torch
+import gc
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
@@ -510,11 +512,15 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 lane_id = lid
                                 break
 
-                    # Initialize position history
+                    # Initialize position history with bounded size to prevent memory accumulation
+                    # CRITICAL: Limit to last 10 positions - we only need recent history for line crossing
                     if objectID not in previous_positions:
                         previous_positions[objectID] = []
 
                     previous_positions[objectID].append((cx, cy))
+                    # Keep only last 10 positions to prevent unbounded memory growth
+                    if len(previous_positions[objectID]) > 10:
+                        previous_positions[objectID] = previous_positions[objectID][-10:]
 
                     # Check finish line crossing
                     if (
@@ -543,6 +549,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             # Track in minute tracker if enabled (pass raw class name)
                             if minute_tracker:
                                 minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
+
+                            # Clean up position history for counted vehicle to free memory
+                            del previous_positions[objectID]
 
                             # Detection logging removed for cleaner logs
                             # print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
@@ -702,11 +711,15 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             lane_id = lid
                             break
 
-                # Initialize position history
+                # Initialize position history with bounded size to prevent memory accumulation
+                # CRITICAL: Limit to last 10 positions - we only need recent history for line crossing
                 if objectID not in previous_positions:
                     previous_positions[objectID] = []
 
                 previous_positions[objectID].append((cx, cy))
+                # Keep only last 10 positions to prevent unbounded memory growth
+                if len(previous_positions[objectID]) > 10:
+                    previous_positions[objectID] = previous_positions[objectID][-10:]
 
                 # Check finish line crossing
                 if (
@@ -735,6 +748,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         # Track in minute tracker if enabled (pass raw class name)
                         if minute_tracker:
                             minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
+
+                        # Clean up position history for counted vehicle to free memory
+                        del previous_positions[objectID]
 
                         # Detection logging removed for cleaner logs
                         # print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
@@ -826,7 +842,16 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     cap.release()
     if video_writer:
         video_writer.release()
-    
+
+    # CRITICAL: Release YOLO model and GPU memory to prevent accumulation
+    # RunPod workers are reused, so memory accumulates if not released
+    print("🧹 Releasing YOLO model and GPU memory...")
+    del model
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print("✅ GPU memory cache cleared")
+
     # Finalize minute tracking if enabled
     total_duration = None
     if minute_tracker:
