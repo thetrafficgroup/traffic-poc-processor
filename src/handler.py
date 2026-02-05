@@ -133,35 +133,53 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
         compressed_path = f"compressed_{output_video_path}"
         hls_playlist_path = None
         hls_folder = None
-        
+
         try:
             import subprocess
             import shutil
-            
-            # Aggressive compression settings for hybrid streaming
-            print("📊 Applying aggressive FFmpeg compression...")
+
+            # Calculate dynamic timeout based on file size
+            # Allow 5 minutes per GB, minimum 10 minutes, maximum 4 hours
+            compression_timeout = max(600, min(14400, int(original_size_mb / 1024 * 300)))
+            print(f"📊 Applying FFmpeg compression (timeout: {compression_timeout}s for {original_size_mb:.0f}MB)...")
+
+            # First, probe the video to check if it has audio
+            probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', output_video_path]
+            probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=30)
+            has_audio = 'audio' in probe_result.stdout
+            print(f"📊 Video has audio: {has_audio}")
+
+            # Build compression command - handle videos with or without audio
             compression_cmd = [
                 'ffmpeg', '-i', output_video_path,
                 # Video compression
                 '-c:v', 'libx264',
-                '-preset', 'veryslow',  # Best compression efficiency
-                '-crf', '28',  # Higher CRF for more compression
+                '-preset', 'fast',  # Good balance of speed and compression (3x faster than veryslow)
+                '-crf', '26',  # Good compression with slightly better quality than 28
                 '-profile:v', 'baseline',
                 '-level', '3.1',
                 '-pix_fmt', 'yuv420p',
-                # Audio compression
-                '-c:a', 'aac',
-                '-b:a', '64k',  # Low audio bitrate
-                '-ar', '22050',  # Lower sample rate
-                # Optimization flags
+            ]
+
+            # Only add audio encoding if the source has audio
+            if has_audio:
+                compression_cmd.extend([
+                    '-c:a', 'aac',
+                    '-b:a', '64k',
+                    '-ar', '22050',
+                ])
+            else:
+                compression_cmd.extend(['-an'])  # No audio
+
+            # Add optimization flags
+            compression_cmd.extend([
                 '-movflags', '+faststart',
                 '-tune', 'stillimage',  # Optimize for traffic footage
-                '-x264-params', 'ref=1:bframes=0:me=dia:subme=2:trellis=0:fast-pskip=1:weightp=0',
                 '-y', compressed_path
-            ]
-            
+            ])
+
             print(f"🔄 Running compression: {' '.join(compression_cmd)}")
-            result = subprocess.run(compression_cmd, capture_output=True, text=True, timeout=600)
+            result = subprocess.run(compression_cmd, capture_output=True, text=True, timeout=compression_timeout)
             
             if result.returncode == 0 and os.path.exists(compressed_path):
                 compressed_size_mb = os.path.getsize(compressed_path) / (1024 * 1024)
@@ -193,46 +211,84 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
         # Generate HLS for videos > 500MB
         if final_size_mb > 500:
             print(f"🎥 Video exceeds 500MB, generating HLS playlist...")
-            
+
             try:
                 # Create HLS output directory
                 video_basename = os.path.splitext(output_video_path)[0]
                 hls_folder = f"{video_basename}_hls"
                 os.makedirs(hls_folder, exist_ok=True)
-                
+
                 hls_playlist_path = os.path.join(hls_folder, "playlist.m3u8")
-                
-                # HLS generation command with multiple quality levels
-                hls_cmd = [
-                    'ffmpeg', '-i', output_video_path,
-                    # Multiple quality streams for adaptive bitrate
-                    # 720p stream
-                    '-map', '0:v:0', '-map', '0:a:0',
-                    '-c:v:0', 'libx264', '-c:a:0', 'aac',
-                    '-b:v:0', '2500k', '-b:a:0', '128k',
-                    '-s:v:0', '1280x720', '-profile:v:0', 'main',
-                    # 480p stream  
-                    '-map', '0:v:0', '-map', '0:a:0',
-                    '-c:v:1', 'libx264', '-c:a:1', 'aac',
-                    '-b:v:1', '1000k', '-b:a:1', '64k',
-                    '-s:v:1', '854x480', '-profile:v:1', 'baseline',
-                    # 360p stream
-                    '-map', '0:v:0', '-map', '0:a:0', 
-                    '-c:v:2', 'libx264', '-c:a:2', 'aac',
-                    '-b:v:2', '600k', '-b:a:2', '64k',
-                    '-s:v:2', '640x360', '-profile:v:2', 'baseline',
-                    # HLS settings - 1 hour chunks for traffic analysis
-                    '-f', 'hls',
-                    '-hls_time', '3600',  # 1 hour chunks (3600 seconds)
-                    '-hls_playlist_type', 'vod',
-                    '-hls_segment_filename', os.path.join(hls_folder, 'segment_%v_%03d.ts'),
-                    '-master_pl_name', 'master.m3u8',
-                    '-var_stream_map', 'v:0,a:0,name:720p v:1,a:1,name:480p v:2,a:2,name:360p',
-                    '-y', hls_playlist_path
-                ]
-                
-                print(f"🎥 Generating HLS: {' '.join(hls_cmd[:10])}... (truncated)")
-                hls_result = subprocess.run(hls_cmd, capture_output=True, text=True, timeout=900)
+
+                # Calculate dynamic timeout for HLS (longer than compression)
+                hls_timeout = max(900, int(final_size_mb / 1024 * 600))  # 10 min per GB
+
+                # Check if video has audio (may have been set earlier, or probe again)
+                if 'has_audio' not in dir():
+                    probe_cmd = ['ffprobe', '-v', 'error', '-select_streams', 'a', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', output_video_path]
+                    probe_result = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=30)
+                    has_audio = 'audio' in probe_result.stdout
+
+                # Build HLS command based on whether video has audio
+                if has_audio:
+                    # HLS generation command with multiple quality levels (with audio)
+                    hls_cmd = [
+                        'ffmpeg', '-i', output_video_path,
+                        # 720p stream
+                        '-map', '0:v:0', '-map', '0:a:0',
+                        '-c:v:0', 'libx264', '-c:a:0', 'aac',
+                        '-b:v:0', '2500k', '-b:a:0', '128k',
+                        '-s:v:0', '1280x720', '-profile:v:0', 'main',
+                        # 480p stream
+                        '-map', '0:v:0', '-map', '0:a:0',
+                        '-c:v:1', 'libx264', '-c:a:1', 'aac',
+                        '-b:v:1', '1000k', '-b:a:1', '64k',
+                        '-s:v:1', '854x480', '-profile:v:1', 'baseline',
+                        # 360p stream
+                        '-map', '0:v:0', '-map', '0:a:0',
+                        '-c:v:2', 'libx264', '-c:a:2', 'aac',
+                        '-b:v:2', '600k', '-b:a:2', '64k',
+                        '-s:v:2', '640x360', '-profile:v:2', 'baseline',
+                        # HLS settings
+                        '-f', 'hls',
+                        '-hls_time', '3600',
+                        '-hls_playlist_type', 'vod',
+                        '-hls_segment_filename', os.path.join(hls_folder, 'segment_%v_%03d.ts'),
+                        '-master_pl_name', 'master.m3u8',
+                        '-var_stream_map', 'v:0,a:0,name:720p v:1,a:1,name:480p v:2,a:2,name:360p',
+                        '-y', hls_playlist_path
+                    ]
+                else:
+                    # HLS generation command for video-only (no audio)
+                    hls_cmd = [
+                        'ffmpeg', '-i', output_video_path,
+                        # 720p stream (video only)
+                        '-map', '0:v:0',
+                        '-c:v:0', 'libx264',
+                        '-b:v:0', '2500k',
+                        '-s:v:0', '1280x720', '-profile:v:0', 'main',
+                        # 480p stream
+                        '-map', '0:v:0',
+                        '-c:v:1', 'libx264',
+                        '-b:v:1', '1000k',
+                        '-s:v:1', '854x480', '-profile:v:1', 'baseline',
+                        # 360p stream
+                        '-map', '0:v:0',
+                        '-c:v:2', 'libx264',
+                        '-b:v:2', '600k',
+                        '-s:v:2', '640x360', '-profile:v:2', 'baseline',
+                        # HLS settings
+                        '-f', 'hls',
+                        '-hls_time', '3600',
+                        '-hls_playlist_type', 'vod',
+                        '-hls_segment_filename', os.path.join(hls_folder, 'segment_%v_%03d.ts'),
+                        '-master_pl_name', 'master.m3u8',
+                        '-var_stream_map', 'v:0,name:720p v:1,name:480p v:2,name:360p',
+                        '-y', hls_playlist_path
+                    ]
+
+                print(f"🎥 Generating HLS (timeout: {hls_timeout}s, has_audio: {has_audio}): {' '.join(hls_cmd[:10])}... (truncated)")
+                hls_result = subprocess.run(hls_cmd, capture_output=True, text=True, timeout=hls_timeout)
                 
                 if hls_result.returncode == 0 and os.path.exists(hls_playlist_path):
                     print("✅ HLS playlist generated successfully")
