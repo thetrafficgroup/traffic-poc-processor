@@ -140,6 +140,7 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
 
             # Calculate dynamic timeout based on file size
             # Allow 5 minutes per GB, minimum 10 minutes, maximum 4 hours
+            # v2: Updated compression settings (fast preset, CRF 26)
             compression_timeout = max(600, min(14400, int(original_size_mb / 1024 * 300)))
             print(f"📊 Applying FFmpeg compression (timeout: {compression_timeout}s for {original_size_mb:.0f}MB)...")
 
