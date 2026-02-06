@@ -238,8 +238,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         # Tabla corregida basada en perspectiva del conductor
         # Giro a la derecha = clockwise, Giro a la izquierda = counterclockwise  
         transitions = {
-            ('NORTH', 'EAST'): 'right',  # Norte -> Este = giro derecha
-            ('NORTH', 'WEST'): 'left',   # Norte -> Oeste = giro izquierda
+            ('NORTH', 'EAST'): 'left',   # Norte -> Este = giro izquierda
+            ('NORTH', 'WEST'): 'right',  # Norte -> Oeste = giro derecha
             ('NORTH', 'SOUTH'): 'straight',
             ('EAST', 'SOUTH'): 'left',   # Este -> Sur = giro izquierda
             ('EAST', 'NORTH'): 'right',  # Este -> Norte = giro derecha
