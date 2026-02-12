@@ -1,0 +1,385 @@
+================================================================================
+TRAFFIC PROCESSOR LOG
+================================================================================
+Video UUID:  e6d3b9a2-f179-4c79-b814-f9afa31830d0
+Study Type:  ATR
+Start Time:  2026-02-05T01:45:47.195178+00:00
+================================================================================
+
+🚀 HANDLER STARTED with event:  {'delayTime': 19016, 'id': 'c73349f3-4d50-4769-bb7d-68c0a5f8a437-u1', 'input': {'generate_video_output': True, 'lines': {'finish_line': [{'x': 382.5, 'y': 29}, {'x': 90.5, 'y': 443}], 'lanes': [{'id': 0, 'points': [{'x': 51.5, 'y': 162}, {'x': 0.5, 'y': 284}, {'x': 388.5, 'y': 473}, {'x': 493.5, 'y': 232}]}, {'id': 1, 'points': [{'x': 145.5, 'y': 92}, {'x': 93.5, 'y': 136}, {'x': 530.5, 'y': 170}, {'x': 550.5, 'y': 111}]}]}, 'model_key': 'models/best.pt', 'queue_url': 'https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue', 's3_bucket': 'trafficgroup-ne-data-sb', 'study_type': 'ATR', 'video_key': 'videos/3f61ca32-0c0f-4702-ac91-5dd0a0a8bf5d.mp4', 'video_start_time': '2026-02-19T00:00:00.000Z', 'video_uuid': 'e6d3b9a2-f179-4c79-b814-f9afa31830d0'}, 'status': 'IN_QUEUE'}
+→ Descargando videos/3f61ca32-0c0f-4702-ac91-5dd0a0a8bf5d.mp4 desde bucket trafficgroup-ne-data-sb...
+→ Descargando models/best.pt desde bucket trafficgroup-ne-data-sb...
+📊 No trimming specified, processing entire video
+✅ YOLO model loaded: best.pt
+📊 ATR: No trimming specified, processing entire video
+🔄 ATR MinuteTracker enabled for video e6d3b9a2-f179-4c79-b814-f9afa31830d0
+📉 Reducing ATR output FPS from 29 to 15 for compression
+✅ Fallback to ATR video codec: XVID
+📊 Processing entire ATR video (no trimming)
+📊 PROGRESS TRACKING CONFIG:
+   └─ Total frames: 107877
+   └─ Progress calculation: frame_count / 107877
+📊 PROGRESS UPDATE [NORMAL]: 0% | Elapsed: 0.8s | ETA: 0s (0.0 min)
+   └─ Frames: 1/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 1% | Elapsed: 13.6s | ETA: 1342s (22.4 min)
+   └─ Frames: 1079/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 2% | Elapsed: 25.7s | ETA: 1257s (20.9 min)
+   └─ Frames: 2158/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 3% | Elapsed: 38.0s | ETA: 1227s (20.4 min)
+   └─ Frames: 3237/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 4% | Elapsed: 50.3s | ETA: 1207s (20.1 min)
+   └─ Frames: 4316/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 5% | Elapsed: 62.6s | ETA: 1189s (19.8 min)
+   └─ Frames: 5394/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 6% | Elapsed: 74.6s | ETA: 1168s (19.5 min)
+   └─ Frames: 6473/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 7% | Elapsed: 87.7s | ETA: 1165s (19.4 min)
+   └─ Frames: 7552/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 8% | Elapsed: 103.7s | ETA: 1192s (19.9 min)
+   └─ Frames: 8631/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📦 Sending minute batch via SQS: e6d3b9a2-f179-4c79-b814-f9afa31830d0-atr-batch-001
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 9% | Elapsed: 116.0s | ETA: 1173s (19.6 min)
+   └─ Frames: 9709/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 10% | Elapsed: 128.8s | ETA: 1159s (19.3 min)
+   └─ Frames: 10788/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 11% | Elapsed: 140.9s | ETA: 1139s (19.0 min)
+   └─ Frames: 11867/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 12% | Elapsed: 152.7s | ETA: 1119s (18.6 min)
+   └─ Frames: 12946/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 13% | Elapsed: 165.2s | ETA: 1105s (18.4 min)
+   └─ Frames: 14025/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 14% | Elapsed: 177.3s | ETA: 1088s (18.1 min)
+   └─ Frames: 15103/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 15% | Elapsed: 189.7s | ETA: 1074s (17.9 min)
+   └─ Frames: 16182/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 16% | Elapsed: 203.8s | ETA: 1070s (17.8 min)
+   └─ Frames: 17261/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📦 Sending minute batch via SQS: e6d3b9a2-f179-4c79-b814-f9afa31830d0-atr-batch-002
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 17% | Elapsed: 217.2s | ETA: 1060s (17.7 min)
+   └─ Frames: 18340/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 18% | Elapsed: 229.0s | ETA: 1043s (17.4 min)
+   └─ Frames: 19418/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 19% | Elapsed: 241.0s | ETA: 1027s (17.1 min)
+   └─ Frames: 20497/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 20% | Elapsed: 253.4s | ETA: 1013s (16.9 min)
+   └─ Frames: 21576/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 21% | Elapsed: 265.9s | ETA: 1000s (16.7 min)
+   └─ Frames: 22655/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 22% | Elapsed: 277.9s | ETA: 985s (16.4 min)
+   └─ Frames: 23733/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 23% | Elapsed: 290.1s | ETA: 971s (16.2 min)
+   └─ Frames: 24812/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 24% | Elapsed: 302.4s | ETA: 957s (15.9 min)
+   └─ Frames: 25891/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 25% | Elapsed: 315.1s | ETA: 945s (15.8 min)
+   └─ Frames: 26970/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📦 Sending minute batch via SQS: e6d3b9a2-f179-4c79-b814-f9afa31830d0-atr-batch-003
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 26% | Elapsed: 328.1s | ETA: 933s (15.6 min)
+   └─ Frames: 28049/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 27% | Elapsed: 341.5s | ETA: 923s (15.4 min)
+   └─ Frames: 29127/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 28% | Elapsed: 354.1s | ETA: 910s (15.2 min)
+   └─ Frames: 30206/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 29% | Elapsed: 367.1s | ETA: 898s (15.0 min)
+   └─ Frames: 31285/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 30% | Elapsed: 380.0s | ETA: 886s (14.8 min)
+   └─ Frames: 32364/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 31% | Elapsed: 393.3s | ETA: 875s (14.6 min)
+   └─ Frames: 33442/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 32% | Elapsed: 406.1s | ETA: 863s (14.4 min)
+   └─ Frames: 34521/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 33% | Elapsed: 419.0s | ETA: 850s (14.2 min)
+   └─ Frames: 35600/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📦 Sending minute batch via SQS: e6d3b9a2-f179-4c79-b814-f9afa31830d0-atr-batch-004
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 34% | Elapsed: 431.7s | ETA: 838s (14.0 min)
+   └─ Frames: 36679/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 35% | Elapsed: 445.2s | ETA: 826s (13.8 min)
+   └─ Frames: 37757/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 36% | Elapsed: 458.6s | ETA: 815s (13.6 min)
+   └─ Frames: 38836/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 37% | Elapsed: 471.8s | ETA: 803s (13.4 min)
+   └─ Frames: 39915/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 38% | Elapsed: 484.8s | ETA: 790s (13.2 min)
+   └─ Frames: 40994/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 39% | Elapsed: 497.6s | ETA: 778s (13.0 min)
+   └─ Frames: 42073/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 40% | Elapsed: 510.2s | ETA: 765s (12.8 min)
+   └─ Frames: 43151/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 41% | Elapsed: 522.7s | ETA: 752s (12.5 min)
+   └─ Frames: 44230/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📦 Sending minute batch via SQS: e6d3b9a2-f179-4c79-b814-f9afa31830d0-atr-batch-005
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 42% | Elapsed: 535.0s | ETA: 738s (12.3 min)
+   └─ Frames: 45309/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 43% | Elapsed: 547.7s | ETA: 726s (12.1 min)
+   └─ Frames: 46388/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 44% | Elapsed: 559.5s | ETA: 712s (11.9 min)
+   └─ Frames: 47466/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 45% | Elapsed: 571.5s | ETA: 698s (11.6 min)
+   └─ Frames: 48545/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 46% | Elapsed: 583.7s | ETA: 685s (11.4 min)
+   └─ Frames: 49624/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 47% | Elapsed: 596.4s | ETA: 672s (11.2 min)
+   └─ Frames: 50703/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 48% | Elapsed: 608.8s | ETA: 659s (11.0 min)
+   └─ Frames: 51781/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 49% | Elapsed: 621.6s | ETA: 647s (10.8 min)
+   └─ Frames: 52860/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 50% | Elapsed: 634.1s | ETA: 634s (10.6 min)
+   └─ Frames: 53939/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📦 Sending minute batch via SQS: e6d3b9a2-f179-4c79-b814-f9afa31830d0-atr-batch-006
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 51% | Elapsed: 646.4s | ETA: 621s (10.3 min)
+   └─ Frames: 55018/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 52% | Elapsed: 659.6s | ETA: 608s (10.1 min)
+   └─ Frames: 56097/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 53% | Elapsed: 672.7s | ETA: 596s (9.9 min)
+   └─ Frames: 57175/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 54% | Elapsed: 685.3s | ETA: 583s (9.7 min)
+   └─ Frames: 58254/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 55% | Elapsed: 698.4s | ETA: 571s (9.5 min)
+   └─ Frames: 59333/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 56% | Elapsed: 710.9s | ETA: 558s (9.3 min)
+   └─ Frames: 60412/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 57% | Elapsed: 723.4s | ETA: 545s (9.1 min)
+   └─ Frames: 61490/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 58% | Elapsed: 736.2s | ETA: 533s (8.9 min)
+   └─ Frames: 62569/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📦 Sending minute batch via SQS: e6d3b9a2-f179-4c79-b814-f9afa31830d0-atr-batch-007
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 59% | Elapsed: 753.7s | ETA: 523s (8.7 min)
+   └─ Frames: 63648/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 60% | Elapsed: 765.9s | ETA: 510s (8.5 min)
+   └─ Frames: 64727/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 61% | Elapsed: 777.9s | ETA: 497s (8.3 min)
+   └─ Frames: 65805/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 62% | Elapsed: 790.1s | ETA: 484s (8.1 min)
+   └─ Frames: 66884/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 63% | Elapsed: 802.7s | ETA: 471s (7.8 min)
+   └─ Frames: 67963/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 64% | Elapsed: 814.7s | ETA: 458s (7.6 min)
+   └─ Frames: 69042/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 65% | Elapsed: 826.8s | ETA: 445s (7.4 min)
+   └─ Frames: 70121/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 66% | Elapsed: 839.0s | ETA: 432s (7.2 min)
+   └─ Frames: 71199/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📦 Sending minute batch via SQS: e6d3b9a2-f179-4c79-b814-f9afa31830d0-atr-batch-008
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 67% | Elapsed: 853.7s | ETA: 420s (7.0 min)
+   └─ Frames: 72278/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 68% | Elapsed: 866.8s | ETA: 407s (6.8 min)
+   └─ Frames: 73357/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 69% | Elapsed: 879.7s | ETA: 395s (6.6 min)
+   └─ Frames: 74436/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 70% | Elapsed: 894.8s | ETA: 383s (6.4 min)
+   └─ Frames: 75514/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 71% | Elapsed: 910.2s | ETA: 371s (6.2 min)
+   └─ Frames: 76593/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 72% | Elapsed: 923.5s | ETA: 359s (6.0 min)
+   └─ Frames: 77672/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 73% | Elapsed: 937.0s | ETA: 346s (5.8 min)
+   └─ Frames: 78751/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 74% | Elapsed: 950.1s | ETA: 333s (5.5 min)
+   └─ Frames: 79829/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 75% | Elapsed: 963.6s | ETA: 321s (5.3 min)
+   └─ Frames: 80908/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📦 Sending minute batch via SQS: e6d3b9a2-f179-4c79-b814-f9afa31830d0-atr-batch-009
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 76% | Elapsed: 976.7s | ETA: 308s (5.1 min)
+   └─ Frames: 81987/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 77% | Elapsed: 989.3s | ETA: 295s (4.9 min)
+   └─ Frames: 83066/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 78% | Elapsed: 1001.9s | ETA: 282s (4.7 min)
+   └─ Frames: 84145/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 79% | Elapsed: 1019.3s | ETA: 270s (4.5 min)
+   └─ Frames: 85223/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 80% | Elapsed: 1033.4s | ETA: 258s (4.3 min)
+   └─ Frames: 86302/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 81% | Elapsed: 1045.4s | ETA: 245s (4.1 min)
+   └─ Frames: 87381/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 82% | Elapsed: 1058.4s | ETA: 232s (3.9 min)
+   └─ Frames: 88460/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 83% | Elapsed: 1071.4s | ETA: 219s (3.6 min)
+   └─ Frames: 89538/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📦 Sending minute batch via SQS: e6d3b9a2-f179-4c79-b814-f9afa31830d0-atr-batch-010
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 84% | Elapsed: 1084.6s | ETA: 206s (3.4 min)
+   └─ Frames: 90617/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 85% | Elapsed: 1097.1s | ETA: 193s (3.2 min)
+   └─ Frames: 91696/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 86% | Elapsed: 1109.9s | ETA: 180s (3.0 min)
+   └─ Frames: 92775/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 87% | Elapsed: 1122.3s | ETA: 167s (2.8 min)
+   └─ Frames: 93853/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 88% | Elapsed: 1135.1s | ETA: 154s (2.6 min)
+   └─ Frames: 94932/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 89% | Elapsed: 1147.6s | ETA: 141s (2.4 min)
+   └─ Frames: 96011/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 90% | Elapsed: 1160.0s | ETA: 128s (2.1 min)
+   └─ Frames: 97090/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 91% | Elapsed: 1174.3s | ETA: 116s (1.9 min)
+   └─ Frames: 98169/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📦 Sending minute batch via SQS: e6d3b9a2-f179-4c79-b814-f9afa31830d0-atr-batch-011
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 92% | Elapsed: 1186.5s | ETA: 103s (1.7 min)
+   └─ Frames: 99247/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 93% | Elapsed: 1198.6s | ETA: 90s (1.5 min)
+   └─ Frames: 100326/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 94% | Elapsed: 1210.7s | ETA: 77s (1.3 min)
+   └─ Frames: 101405/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 95% | Elapsed: 1223.1s | ETA: 64s (1.1 min)
+   └─ Frames: 102484/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 96% | Elapsed: 1235.6s | ETA: 51s (0.8 min)
+   └─ Frames: 103562/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 97% | Elapsed: 1247.9s | ETA: 38s (0.6 min)
+   └─ Frames: 104641/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 98% | Elapsed: 1260.8s | ETA: 25s (0.4 min)
+   └─ Frames: 105720/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+📊 PROGRESS UPDATE [NORMAL]: 99% | Elapsed: 1274.7s | ETA: 12s (0.2 min)
+   └─ Frames: 106799/107877
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+✅ ATR Processing complete: 107877 frames processed
+🧹 Releasing YOLO model and GPU memory...
+✅ GPU memory cache cleared
+📦 Sending minute batch via SQS: e6d3b9a2-f179-4c79-b814-f9afa31830d0-atr-batch-012
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+[ATR DEBUG] Total detections: 53982
+[ATR DEBUG] Unique tracked objects: 7792
+[ATR DEBUG] Objects counted: 1237
+[ATR DEBUG] Final lane counts: {0: 749, 1: 488}
+[ATR DEBUG] Total count: 1237
+🗑️ Cleaned up input video: video_e6d3b9a2-f179-4c79-b814-f9afa31830d0.mp4
+📊 Processing output video for hybrid streaming: output_e6d3b9a2-f179-4c79-b814-f9afa31830d0.mp4
+📊 Original video size: 1794.47 MB
+📊 Applying aggressive FFmpeg compression...
+🔄 Running compression: ffmpeg -i output_e6d3b9a2-f179-4c79-b814-f9afa31830d0.mp4 -c:v libx264 -preset veryslow -crf 28 -profile:v baseline -level 3.1 -pix_fmt yuv420p -c:a aac -b:a 64k -ar 22050 -movflags +faststart -tune stillimage -x264-params ref=1:bframes=0:me=dia:subme=2:trellis=0:fast-pskip=1:weightp=0 -y compressed_output_e6d3b9a2-f179-4c79-b814-f9afa31830d0.mp4
+✅ Video compressed: 321.14 MB (0.18x compression)
+📊 Final video size: 321.14 MB
+📊 Video under 500MB, skipping HLS generation
+📤 Uploading final video to S3: videos/3f61ca32-0c0f-4702-ac91-5dd0a0a8bf5d_output.mp4
+→ Subiendo compressed_output_e6d3b9a2-f179-4c79-b814-f9afa31830d0.mp4 a s3://trafficgroup-ne-data-sb/videos/3f61ca32-0c0f-4702-ac91-5dd0a0a8bf5d_output.mp4...
+✓ Archivo subido exitosamente con content-type: video/mp4
+🗑️ Cleaned up local output video: compressed_output_e6d3b9a2-f179-4c79-b814-f9afa31830d0.mp4
+🔄 Normalizing ATR results...
+📋 Original results keys: ['lane_counts', 'total_count', 'study_type', 'detected_classes', 'vehicles', 'originalSizeMB', 'compressionRatio', 'isHlsEnabled', 'videoOutput', 'videoSizeMB']
+🎬 Original videoOutput: videos/3f61ca32-0c0f-4702-ac91-5dd0a0a8bf5d_output.mp4
+✅ Results normalized. Original keys: ['lane_counts', 'total_count', 'study_type', 'detected_classes', 'vehicles', 'originalSizeMB', 'compressionRatio', 'isHlsEnabled', 'videoOutput', 'videoSizeMB']
+✅ Normalized keys: ['study_type', 'total_count', 'total_vehicles', 'lane_counts', 'lanes', 'direction_counts', 'counts', 'turns', 'turn_summary', 'detected_classes', 'vehicle_types', 'vehicles', 'validation', 'metadata', 'videoOutput']
+🎬 Normalized videoOutput: videos/3f61ca32-0c0f-4702-ac91-5dd0a0a8bf5d_output.mp4
+📊 Including video size: 321.14 MB
+📊 Including compression ratio: 0.179
+📊 Including original size: 1794.47 MB
+→ Enviando a SQS: https://sqs.us-east-1.amazonaws.com/443630454798/trafficgroup-processor-queue
+✅ Handler completed successfully.
+
+================================================================================
+END OF LOG
+================================================================================
+End Time:    2026-02-05T02:10:07.111802+00:00
+Duration:    1459.92 seconds (24.33 minutes)
+Status:      SUCCESS
+================================================================================
