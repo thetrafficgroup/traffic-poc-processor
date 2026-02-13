@@ -1,7 +1,7 @@
 from tmc.tmc_processor import process_video as tmc_process_video
 from atr.atr_processor import process_video as atr_process_video
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", study_type="TMC", video_uuid=None, progress_callback=None, minute_batch_callback=None, generate_video_output=False, output_video_path=None, trim_periods=None):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", study_type="TMC", video_uuid=None, progress_callback=None, minute_batch_callback=None, generate_video_output=False, output_video_path=None, trim_periods=None, pedestrian_model_path=None):
     """
     Routes video processing based on study type.
 
@@ -16,6 +16,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", study_type="TMC"
         generate_video_output: Whether to generate annotated output video
         output_video_path: Path for output video (if generate_video_output=True)
         trim_periods: Optional list of trim periods in seconds [{"start": 3600, "end": 10800}, ...]
+        pedestrian_model_path: Optional path to pedestrian/bicycle YOLO model
 
     Returns:
         Processing results based on study type.
@@ -23,7 +24,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", study_type="TMC"
 
     if study_type.upper() == "TMC":
         return tmc_process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH, video_uuid, progress_callback,
-                                minute_batch_callback, generate_video_output, output_video_path, trim_periods)
+                                minute_batch_callback, generate_video_output, output_video_path, trim_periods,
+                                pedestrian_model_path=pedestrian_model_path)
     elif study_type.upper() == "ATR":
         return atr_process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH, progress_callback,
                                 generate_video_output, output_video_path, video_uuid, minute_batch_callback, trim_periods)

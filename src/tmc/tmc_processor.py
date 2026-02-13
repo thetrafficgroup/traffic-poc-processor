@@ -16,11 +16,15 @@ from utils.overlap_detection import (
 )
 from utils.minute_tracker import MinuteTracker
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
+from crosswalk.crosswalk_processor import CrosswalkProcessor
+from crosswalk.crosswalk_minute_tracker import CrosswalkMinuteTracker
 
 CONF_THRESHOLD = 0.01
 IMG_SIZE = 640
 IOU_THRESHOLD = 0.2
 DIST_THRESHOLD = 10
+PED_TRACK_ID_OFFSET = 1_000_000  # Namespace offset to prevent ID collision between vehicle and ped models
+PED_CONF_THRESHOLD = 0.25  # Higher confidence for pedestrian model (fewer false positives needed)
 
 
 
@@ -117,13 +121,109 @@ def is_entering_from_outside(line_name, prev_pos, curr_pos, line_coords):
     return False
 
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None, progress_callback=None, minute_batch_callback=None, generate_video_output=False, output_video_path=None, trim_periods=None):
+def process_single_detection(
+    obj_id, class_name, cx, cy, wx, wy, current_frame,
+    prev_wheels, prev_centroids, counted_ids_per_line,
+    entry_counted_ids, crossed_lines_by_id, crossing_timestamps,
+    turn_types_by_id, detected_classes, class_counts_by_id,
+    LINES, DIST_THRESHOLD, point_line_distance, is_entering_fn, classify_turn_fn,
+    track_interpolator=None, counts=None,
+):
+    """
+    Process a single detection through TMC turn logic.
+    Extracted from inline code so it can be reused for both vehicle and bicycle detections.
+
+    Args:
+        obj_id: Track ID (namespaced for ped model)
+        class_name: Detection class name
+        cx, cy: Centroid position
+        wx, wy: Wheels/bottom position (for line crossing)
+        current_frame: Current frame number
+        prev_wheels, prev_centroids: Previous position dicts (mutated)
+        counted_ids_per_line, entry_counted_ids: Counting state (mutated)
+        crossed_lines_by_id, crossing_timestamps: Crossing tracking (mutated)
+        turn_types_by_id, detected_classes, class_counts_by_id: Classification state (mutated)
+        LINES: List of line dicts with name, pt1, pt2
+        DIST_THRESHOLD: Distance threshold for line crossing
+        point_line_distance: Distance calculation function
+        is_entering_fn: Function to check if entering from outside
+        classify_turn_fn: Function to classify turn type
+        track_interpolator: Optional track interpolator for centroid tracking
+    """
+    # Store class for this object ID (first detection wins)
+    if obj_id not in class_counts_by_id:
+        class_counts_by_id[obj_id] = class_name
+
+    # Update track interpolator if available
+    if track_interpolator is not None:
+        track_interpolator.update_track(obj_id, (cx, cy), current_frame)
+
+    # Get previous positions
+    prev_wheels_pos = prev_wheels.get(obj_id)
+    prev_centroid_pos = prev_centroids.get(obj_id)
+
+    if prev_wheels_pos and prev_centroid_pos:
+        for line in LINES:
+            name = line["name"]
+            x1, y1 = line["pt1"]
+            x2, y2 = line["pt2"]
+
+            # Use wheels position with centroid fallback for line crossing detection
+            dist = point_line_distance(wx, wy, x1, y1, x2, y2)
+            prev_dist = point_line_distance(
+                prev_wheels_pos[0], prev_wheels_pos[1], x1, y1, x2, y2
+            )
+
+            # If wheels are too far from line, fallback to centroid
+            if dist > DIST_THRESHOLD * 2:
+                dist = point_line_distance(cx, cy, x1, y1, x2, y2)
+            if prev_dist > DIST_THRESHOLD * 2:
+                prev_dist = point_line_distance(
+                    prev_centroid_pos[0], prev_centroid_pos[1], x1, y1, x2, y2
+                )
+
+            crossed = dist < DIST_THRESHOLD and prev_dist > DIST_THRESHOLD
+
+            if crossed and obj_id not in counted_ids_per_line[name]:
+                counted_ids_per_line[name].add(obj_id)
+                if counts is not None:
+                    counts[name] = counts.get(name, 0) + 1
+
+                # Check if entering from outside
+                if obj_id not in entry_counted_ids and is_entering_fn(name, prev_centroid_pos, (cx, cy), line):
+                    entry_counted_ids.add(obj_id)
+                    if obj_id not in detected_classes:
+                        detected_classes[obj_id] = class_name
+
+                # Register crossing with timestamp
+                if obj_id not in crossed_lines_by_id:
+                    crossed_lines_by_id[obj_id] = []
+                    crossing_timestamps[obj_id] = []
+
+                if name not in [crossing[0] for crossing in crossing_timestamps[obj_id]]:
+                    import time as time_mod
+                    current_time = time_mod.time()
+                    crossed_lines_by_id[obj_id].append(name)
+                    crossing_timestamps[obj_id].append((name, current_time))
+
+                # Turn detection when 2+ crossings
+                if len(crossing_timestamps[obj_id]) >= 2 and obj_id not in turn_types_by_id:
+                    turn_type = classify_turn_fn(crossing_timestamps[obj_id])
+                    if turn_type != 'invalid' and turn_type != 'unknown':
+                        turn_types_by_id[obj_id] = turn_type
+
+    # Always update previous positions
+    prev_centroids[obj_id] = (cx, cy)
+    prev_wheels[obj_id] = (wx, wy)
+
+
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None, progress_callback=None, minute_batch_callback=None, generate_video_output=False, output_video_path=None, trim_periods=None, pedestrian_model_path=None):
     """
     Process video for TMC (Turning Movement Count) analysis with optional trimming.
 
     Args:
         VIDEO_PATH: Path to video file
-        LINES_DATA: Line configuration data
+        LINES_DATA: Line configuration data (may include 'crosswalks' key)
         MODEL_PATH: Path to YOLO model
         video_uuid: UUID of the video being processed
         progress_callback: Optional callback for progress updates
@@ -131,9 +231,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         generate_video_output: Whether to generate annotated output video
         output_video_path: Path for output video (if generate_video_output=True)
         trim_periods: Optional list of trim periods in seconds [{"start": 3600, "end": 10800}, ...]
+        pedestrian_model_path: Optional path to pedestrian/bicycle YOLO model
 
     Returns:
-        Dictionary with processing results
+        Dictionary with processing results (includes crosswalk data if applicable)
     """
 
     # Validate trim periods if provided
@@ -153,7 +254,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     model = YOLO(MODEL_PATH)
     print(f"✅ YOLO model loaded: {MODEL_PATH}")
 
-    raw_lines = LINES_DATA
+    # CRITICAL: Strip crosswalks from LINES_DATA before line-parsing loop.
+    # The crosswalks key contains an array, not a dict with pt1/pt2.
+    # Leaving it would crash with TypeError in the loop below.
+    raw_lines = dict(LINES_DATA)  # Copy to avoid mutating caller's data
+    crosswalks_config = raw_lines.pop("crosswalks", [])
 
     def ensure_int_coords(point):
         """Convert point coordinates to integers, handling both dict and tuple formats"""
@@ -293,8 +398,26 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             
         minute_tracker = MinuteTracker(fps, video_uuid, minute_batch_callback)
         print(f"📊 Enhanced minute tracking enabled for video {video_uuid}")
-    
-    # Initialize video writer if output video is requested  
+
+    # Initialize pedestrian/bicycle model if crosswalks are configured
+    ped_model = None
+    crosswalk_proc = None
+    crosswalk_minute_tracker = None
+    if crosswalks_config and pedestrian_model_path:
+        ped_model = YOLO(pedestrian_model_path)
+        print(f"✅ Pedestrian model loaded: {pedestrian_model_path}")
+        crosswalk_proc = CrosswalkProcessor(crosswalks_config, fps)
+        crosswalk_minute_tracker = CrosswalkMinuteTracker(fps)
+        # Link crosswalk tracker so every batch includes crosswalk data
+        if minute_tracker:
+            minute_tracker.set_crosswalk_tracker(crosswalk_minute_tracker)
+        print(f"🚶 Crosswalk processing enabled with {len(crosswalks_config)} crosswalk(s)")
+    elif crosswalks_config and not pedestrian_model_path:
+        print(f"⚠️ Crosswalks configured ({len(crosswalks_config)}) but no pedestrian model path provided")
+    elif pedestrian_model_path and not crosswalks_config:
+        print(f"⚠️ Pedestrian model path provided but no crosswalks configured")
+
+    # Initialize video writer if output video is requested
     video_writer = None
     if generate_video_output and output_video_path:
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
@@ -480,6 +603,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
             # CRITICAL: Reset tracker at start of each period
             reset_tracker()
+            if ped_model is not None and ped_model.predictor is not None:
+                ped_model.predictor.trackers = [None]
+                print("🔄 Pedestrian model tracker reset")
+            if crosswalk_proc is not None:
+                crosswalk_proc.reset_state()
 
             # Clear previous positions to prevent cross-period tracking
             prev_centroids.clear()
@@ -556,86 +684,66 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     for i, box in enumerate(boxes):
                         obj_id = int(ids[i])
                         class_id = int(classes[i])
-                        # Use persistent class: first detection wins (prevents class flip-flopping)
                         class_name = class_counts_by_id.get(obj_id, model.names[class_id])
                         cx, cy = get_centroid(box)
                         wx, wy = get_wheels_position(box)
 
-                        # Store class for this object ID (only if not already stored)
-                        if obj_id not in class_counts_by_id:
-                            class_counts_by_id[obj_id] = class_name
+                        process_single_detection(
+                            obj_id, class_name, cx, cy, wx, wy, current_frame,
+                            prev_wheels, prev_centroids, counted_ids_per_line,
+                            entry_counted_ids, crossed_lines_by_id, crossing_timestamps,
+                            turn_types_by_id, detected_classes, class_counts_by_id,
+                            LINES, DIST_THRESHOLD, point_line_distance,
+                            is_entering_from_outside, classify_turn_from_lines,
+                            track_interpolator, counts=counts,
+                        )
 
-                        # Update track interpolator (use centroid for tracking)
-                        track_interpolator.update_track(obj_id, (cx, cy), current_frame)
+                # Pedestrian/bicycle model inference
+                if ped_model is not None:
+                    ped_results = ped_model.track(
+                        frame, persist=True, conf=PED_CONF_THRESHOLD, imgsz=IMG_SIZE, verbose=False
+                    )
+                    if ped_results and ped_results[0].boxes is not None and ped_results[0].boxes.id is not None:
+                        ped_ids = ped_results[0].boxes.id.cpu().numpy()
+                        ped_boxes = ped_results[0].boxes.xyxy.cpu().numpy()
+                        ped_classes = ped_results[0].boxes.cls.cpu().numpy()
 
-                        # Get previous positions (wheels for line crossing, centroid for direction)
-                        prev_wheels_pos = prev_wheels.get(obj_id)
-                        prev_centroid_pos = prev_centroids.get(obj_id)
+                        for i, box in enumerate(ped_boxes):
+                            raw_id = int(ped_ids[i])
+                            namespaced_id = PED_TRACK_ID_OFFSET + raw_id
+                            class_name = ped_model.names[int(ped_classes[i])]
+                            if class_name == "person":
+                                class_name = "pedestrian"
 
-                        if prev_wheels_pos and prev_centroid_pos:
-                            for line in LINES:
-                                name = line["name"]
-                                x1, y1 = line["pt1"]
-                                x2, y2 = line["pt2"]
+                            bbox = box
+                            cx = int((bbox[0] + bbox[2]) / 2)
+                            cy = int(bbox[3])  # Bottom = feet/wheels
 
-                                # Use wheels position with centroid fallback for line crossing detection
-                                # Priority 1: Try wheels position
-                                dist = point_line_distance(wx, wy, x1, y1, x2, y2)
-                                prev_dist = point_line_distance(
-                                    prev_wheels_pos[0], prev_wheels_pos[1], x1, y1, x2, y2
+                            # Bicycles on the street -> TMC turn logic
+                            if class_name == "bicycle":
+                                process_single_detection(
+                                    namespaced_id, class_name, cx, cy, cx, cy, current_frame,
+                                    prev_wheels, prev_centroids, counted_ids_per_line,
+                                    entry_counted_ids, crossed_lines_by_id, crossing_timestamps,
+                                    turn_types_by_id, detected_classes, class_counts_by_id,
+                                    LINES, DIST_THRESHOLD, point_line_distance,
+                                    is_entering_from_outside, classify_turn_from_lines,
+                                    counts=counts,
                                 )
 
-                                # If wheels are too far from line, fallback to centroid
-                                if dist > DIST_THRESHOLD * 2:  # Wheels not near line
-                                    dist = point_line_distance(cx, cy, x1, y1, x2, y2)
-                                if prev_dist > DIST_THRESHOLD * 2:  # Previous wheels not near line
-                                    prev_dist = point_line_distance(
-                                        prev_centroid_pos[0], prev_centroid_pos[1], x1, y1, x2, y2
+                            # ALL ped/bike detections -> crosswalk processor
+                            if crosswalk_proc is not None:
+                                crossing_result = crosswalk_proc.process_detection(
+                                    namespaced_id, class_name, cx, cy, current_frame
+                                )
+                                if crossing_result and crosswalk_minute_tracker is not None:
+                                    crosswalk_minute_tracker.record_crossing(
+                                        current_frame,
+                                        crossing_result["entity_id"],
+                                        crossing_result["crosswalk"],
+                                        crossing_result["class"],
+                                        crossing_result["direction"],
                                     )
-
-                                crossed = dist < DIST_THRESHOLD and prev_dist > DIST_THRESHOLD
-
-                                if crossed and obj_id not in counted_ids_per_line[name]:
-                                    counted_ids_per_line[name].add(obj_id)
-                                    counts[name] += 1
-
-                                    # Verificar si está entrando desde afuera (para conteo total)
-                                    # Use centroid for direction detection (is_entering_from_outside)
-                                    # CRITICAL: Only count as entry if NOT already counted (prevents duplicate counting)
-                                    if obj_id not in entry_counted_ids and is_entering_from_outside(name, prev_centroid_pos, (cx, cy), line):
-                                        entry_counted_ids.add(obj_id)
-                                        # Detection logging removed for cleaner logs
-                                        # print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (ENTRADA desde afuera)')
-
-                                        # Count detected class only for vehicles entering from outside
-                                        if obj_id not in detected_classes:
-                                            detected_classes[obj_id] = class_name
-                                    else:
-                                        pass  # Internal crossing or already counted - don't log
-                                        # print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (interno, no cuenta para total)')
-
-                                    # Registrar el cruce con timestamp
-                                    if obj_id not in crossed_lines_by_id:
-                                        crossed_lines_by_id[obj_id] = []
-                                        crossing_timestamps[obj_id] = []
-
-                                    if name not in [crossing[0] for crossing in crossing_timestamps[obj_id]]:
-                                        current_time = time.time()
-                                        crossed_lines_by_id[obj_id].append(name)
-                                        crossing_timestamps[obj_id].append((name, current_time))
-
-                                    # Detectar giro cuando haya al menos 2 cruces y no se haya clasificado aún
-                                    if len(crossing_timestamps[obj_id]) >= 2 and obj_id not in turn_types_by_id:
-                                        turn_type = classify_turn_from_lines(crossing_timestamps[obj_id])
-                                        if turn_type != 'invalid' and turn_type != 'unknown':
-                                            turn_types_by_id[obj_id] = turn_type
-                                            from_line = crossing_timestamps[obj_id][0][0]
-                                            to_line = crossing_timestamps[obj_id][-1][0]
-                                            # Turn logging removed for cleaner logs
-                                            # print(f'↪ ID {obj_id} ({class_name}) hizo un giro {turn_type}: {from_line} -> {to_line}')
-
-                        prev_centroids[obj_id] = (cx, cy)
-                        prev_wheels[obj_id] = (wx, wy)
 
                 # Handle missing detections with track interpolation
                 # Clean up old tracks to prevent memory buildup
@@ -790,86 +898,66 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                 for i, box in enumerate(boxes):
                     obj_id = int(ids[i])
                     class_id = int(classes[i])
-                    # Use persistent class: first detection wins (prevents class flip-flopping)
                     class_name = class_counts_by_id.get(obj_id, model.names[class_id])
                     cx, cy = get_centroid(box)
                     wx, wy = get_wheels_position(box)
 
-                    # Store class for this object ID (only if not already stored)
-                    if obj_id not in class_counts_by_id:
-                        class_counts_by_id[obj_id] = class_name
+                    process_single_detection(
+                        obj_id, class_name, cx, cy, wx, wy, current_frame,
+                        prev_wheels, prev_centroids, counted_ids_per_line,
+                        entry_counted_ids, crossed_lines_by_id, crossing_timestamps,
+                        turn_types_by_id, detected_classes, class_counts_by_id,
+                        LINES, DIST_THRESHOLD, point_line_distance,
+                        is_entering_from_outside, classify_turn_from_lines,
+                        track_interpolator, counts=counts,
+                    )
 
-                    # Update track interpolator (use centroid for tracking)
-                    track_interpolator.update_track(obj_id, (cx, cy), current_frame)
+            # Pedestrian/bicycle model inference
+            if ped_model is not None:
+                ped_results = ped_model.track(
+                    frame, persist=True, conf=PED_CONF_THRESHOLD, imgsz=IMG_SIZE, verbose=False
+                )
+                if ped_results and ped_results[0].boxes is not None and ped_results[0].boxes.id is not None:
+                    ped_ids = ped_results[0].boxes.id.cpu().numpy()
+                    ped_boxes = ped_results[0].boxes.xyxy.cpu().numpy()
+                    ped_classes = ped_results[0].boxes.cls.cpu().numpy()
 
-                    # Get previous positions (wheels for line crossing, centroid for direction)
-                    prev_wheels_pos = prev_wheels.get(obj_id)
-                    prev_centroid_pos = prev_centroids.get(obj_id)
+                    for i, box in enumerate(ped_boxes):
+                        raw_id = int(ped_ids[i])
+                        namespaced_id = PED_TRACK_ID_OFFSET + raw_id
+                        class_name = ped_model.names[int(ped_classes[i])]
+                        if class_name == "person":
+                            class_name = "pedestrian"
 
-                    if prev_wheels_pos and prev_centroid_pos:
-                        for line in LINES:
-                            name = line["name"]
-                            x1, y1 = line["pt1"]
-                            x2, y2 = line["pt2"]
+                        bbox = box
+                        cx = int((bbox[0] + bbox[2]) / 2)
+                        cy = int(bbox[3])  # Bottom = feet/wheels
 
-                            # Use wheels position with centroid fallback for line crossing detection
-                            # Priority 1: Try wheels position
-                            dist = point_line_distance(wx, wy, x1, y1, x2, y2)
-                            prev_dist = point_line_distance(
-                                prev_wheels_pos[0], prev_wheels_pos[1], x1, y1, x2, y2
+                        # Bicycles on the street -> TMC turn logic
+                        if class_name == "bicycle":
+                            process_single_detection(
+                                namespaced_id, class_name, cx, cy, cx, cy, current_frame,
+                                prev_wheels, prev_centroids, counted_ids_per_line,
+                                entry_counted_ids, crossed_lines_by_id, crossing_timestamps,
+                                turn_types_by_id, detected_classes, class_counts_by_id,
+                                LINES, DIST_THRESHOLD, point_line_distance,
+                                is_entering_from_outside, classify_turn_from_lines,
+                                counts=counts,
                             )
 
-                            # If wheels are too far from line, fallback to centroid
-                            if dist > DIST_THRESHOLD * 2:  # Wheels not near line
-                                dist = point_line_distance(cx, cy, x1, y1, x2, y2)
-                            if prev_dist > DIST_THRESHOLD * 2:  # Previous wheels not near line
-                                prev_dist = point_line_distance(
-                                    prev_centroid_pos[0], prev_centroid_pos[1], x1, y1, x2, y2
+                        # ALL ped/bike detections -> crosswalk processor
+                        if crosswalk_proc is not None:
+                            crossing_result = crosswalk_proc.process_detection(
+                                namespaced_id, class_name, cx, cy, current_frame
+                            )
+                            if crossing_result and crosswalk_minute_tracker is not None:
+                                crosswalk_minute_tracker.record_crossing(
+                                    current_frame,
+                                    crossing_result["entity_id"],
+                                    crossing_result["crosswalk"],
+                                    crossing_result["class"],
+                                    crossing_result["direction"],
                                 )
-
-                            crossed = dist < DIST_THRESHOLD and prev_dist > DIST_THRESHOLD
-
-                            if crossed and obj_id not in counted_ids_per_line[name]:
-                                counted_ids_per_line[name].add(obj_id)
-                                counts[name] += 1
-
-                                # Verificar si está entrando desde afuera (para conteo total)
-                                # Use centroid for direction detection (is_entering_from_outside)
-                                # CRITICAL: Only count as entry if NOT already counted (prevents duplicate counting)
-                                if obj_id not in entry_counted_ids and is_entering_from_outside(name, prev_centroid_pos, (cx, cy), line):
-                                    entry_counted_ids.add(obj_id)
-                                    # Detection logging removed for cleaner logs
-                                    # print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (ENTRADA desde afuera)')
-
-                                    # Count detected class only for vehicles entering from outside
-                                    if obj_id not in detected_classes:
-                                        detected_classes[obj_id] = class_name
-                                else:
-                                    pass  # Internal crossing or already counted - don't log
-                                    # print(f'[✔] ID {obj_id} ({class_name}) cruzó {name} (interno, no cuenta para total)')
-
-                                # Registrar el cruce con timestamp
-                                if obj_id not in crossed_lines_by_id:
-                                    crossed_lines_by_id[obj_id] = []
-                                    crossing_timestamps[obj_id] = []
-
-                                if name not in [crossing[0] for crossing in crossing_timestamps[obj_id]]:
-                                    current_time = time.time()
-                                    crossed_lines_by_id[obj_id].append(name)
-                                    crossing_timestamps[obj_id].append((name, current_time))
-
-                                # Detectar giro cuando haya al menos 2 cruces y no se haya clasificado aún
-                                if len(crossing_timestamps[obj_id]) >= 2 and obj_id not in turn_types_by_id:
-                                    turn_type = classify_turn_from_lines(crossing_timestamps[obj_id])
-                                    if turn_type != 'invalid' and turn_type != 'unknown':
-                                        turn_types_by_id[obj_id] = turn_type
-                                        from_line = crossing_timestamps[obj_id][0][0]
-                                        to_line = crossing_timestamps[obj_id][-1][0]
-                                        # Turn logging removed for cleaner logs
-                                        # print(f'↪ ID {obj_id} ({class_name}) hizo un giro {turn_type}: {from_line} -> {to_line}')
-
-                    prev_centroids[obj_id] = (cx, cy)
-                    prev_wheels[obj_id] = (wx, wy)
 
             # Handle missing detections with track interpolation
             # Clean up old tracks to prevent memory buildup
@@ -985,10 +1073,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     if video_writer:
         video_writer.release()
 
-    # CRITICAL: Release YOLO model and GPU memory to prevent accumulation
+    # CRITICAL: Release YOLO model(s) and GPU memory to prevent accumulation
     # RunPod workers are reused, so memory accumulates if not released
-    print("🧹 Releasing YOLO model and GPU memory...")
+    print("🧹 Releasing YOLO model(s) and GPU memory...")
     del model
+    if ped_model is not None:
+        del ped_model
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -1041,6 +1131,16 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         video_duration_seconds = minute_tracker.finalize_processing()
         print(f"📊 Video duration calculated: {video_duration_seconds} seconds")
 
+    # Finalize crosswalk tracking
+    crosswalk_results = None
+    crosswalk_totals = None
+    if crosswalk_proc is not None:
+        crosswalk_results = crosswalk_proc.get_results()
+        crosswalk_totals = crosswalk_proc.get_totals()
+        print(f"🚶 Crosswalk results: {crosswalk_totals}")
+    if crosswalk_minute_tracker is not None:
+        crosswalk_minute_tracker.finalize()
+
     return {
         # Original fields (backward compatibility)
         "counts": counts,
@@ -1081,5 +1181,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             "duration_seconds": video_duration_seconds,
             "total_frames": current_frame,
             "fps": fps
-        }
+        },
+
+        # Crosswalk pedestrian/bicycle results (None if no crosswalks configured)
+        "crosswalks": crosswalk_results,
+        "crosswalk_totals": crosswalk_totals,
     }
