@@ -799,6 +799,45 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         cv2.putText(frame, f'{turn_type}: {count}', (20, y_pos),
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
+                    # Draw pedestrian/bicycle detections
+                    if ped_model is not None and ped_results and ped_results[0].boxes is not None and ped_results[0].boxes.id is not None:
+                        ped_vis_ids = ped_results[0].boxes.id.cpu().numpy()
+                        ped_vis_boxes = ped_results[0].boxes.xyxy.cpu().numpy()
+                        ped_vis_classes = ped_results[0].boxes.cls.cpu().numpy()
+
+                        for i, box in enumerate(ped_vis_boxes):
+                            x1, y1, x2, y2 = box
+                            cls_name = ped_model.names[int(ped_vis_classes[i])]
+                            if cls_name == "person":
+                                cls_name = "pedestrian"
+                            # Magenta for pedestrians, orange for bicycles
+                            color = (255, 0, 255) if cls_name == "pedestrian" else (0, 165, 255)
+                            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+                            ped_label = f'{cls_name} #{int(ped_vis_ids[i])}'
+                            cv2.putText(frame, ped_label, (int(x1), int(y1) - 5),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+                    # Draw crosswalk boundary lines
+                    if crosswalk_proc is not None:
+                        for cw in crosswalk_proc.crosswalks:
+                            for cw_line in cw.lines:
+                                cv2.line(frame, cw_line.pt1, cw_line.pt2, (255, 0, 255), 2)
+                                mid_x = (cw_line.pt1[0] + cw_line.pt2[0]) // 2
+                                mid_y = (cw_line.pt1[1] + cw_line.pt2[1]) // 2
+                                cv2.putText(frame, f'{cw.name} - {cw_line.name}', (mid_x, mid_y - 10),
+                                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+
+                        # Draw crosswalk totals in summary overlay
+                        cw_totals = crosswalk_proc.get_totals()
+                        if cw_totals:
+                            y_pos += 30
+                            cv2.putText(frame, 'Crosswalk Counts:', (20, y_pos),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                            for cls_name, total in cw_totals.items():
+                                y_pos += 25
+                                cv2.putText(frame, f'  {cls_name}: {total}', (20, y_pos),
+                                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+
                     # Resize frame if needed for compression
                     if width != int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or height != int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)):
                         frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
@@ -1012,6 +1051,45 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     y_pos += 25
                     cv2.putText(frame, f'{turn_type}: {count}', (20, y_pos),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+
+                # Draw pedestrian/bicycle detections
+                if ped_model is not None and ped_results and ped_results[0].boxes is not None and ped_results[0].boxes.id is not None:
+                    ped_vis_ids = ped_results[0].boxes.id.cpu().numpy()
+                    ped_vis_boxes = ped_results[0].boxes.xyxy.cpu().numpy()
+                    ped_vis_classes = ped_results[0].boxes.cls.cpu().numpy()
+
+                    for i, box in enumerate(ped_vis_boxes):
+                        x1, y1, x2, y2 = box
+                        cls_name = ped_model.names[int(ped_vis_classes[i])]
+                        if cls_name == "person":
+                            cls_name = "pedestrian"
+                        # Magenta for pedestrians, orange for bicycles
+                        color = (255, 0, 255) if cls_name == "pedestrian" else (0, 165, 255)
+                        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+                        ped_label = f'{cls_name} #{int(ped_vis_ids[i])}'
+                        cv2.putText(frame, ped_label, (int(x1), int(y1) - 5),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+                # Draw crosswalk boundary lines
+                if crosswalk_proc is not None:
+                    for cw in crosswalk_proc.crosswalks:
+                        for cw_line in cw.lines:
+                            cv2.line(frame, cw_line.pt1, cw_line.pt2, (255, 0, 255), 2)
+                            mid_x = (cw_line.pt1[0] + cw_line.pt2[0]) // 2
+                            mid_y = (cw_line.pt1[1] + cw_line.pt2[1]) // 2
+                            cv2.putText(frame, f'{cw.name} - {cw_line.name}', (mid_x, mid_y - 10),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
+
+                    # Draw crosswalk totals in summary overlay
+                    cw_totals = crosswalk_proc.get_totals()
+                    if cw_totals:
+                        y_pos += 30
+                        cv2.putText(frame, 'Crosswalk Counts:', (20, y_pos),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
+                        for cls_name, total in cw_totals.items():
+                            y_pos += 25
+                            cv2.putText(frame, f'  {cls_name}: {total}', (20, y_pos),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
 
                 # Resize frame if needed for compression
                 if width != int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or height != int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)):
