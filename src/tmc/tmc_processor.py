@@ -18,13 +18,12 @@ from utils.minute_tracker import MinuteTracker
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
 from crosswalk.crosswalk_processor import CrosswalkProcessor
 from crosswalk.crosswalk_minute_tracker import CrosswalkMinuteTracker
+from pedestrian.pedestrian_processor import PedestrianProcessor
 
 CONF_THRESHOLD = 0.01
 IMG_SIZE = 640
 IOU_THRESHOLD = 0.2
 DIST_THRESHOLD = 10
-PED_TRACK_ID_OFFSET = 1_000_000  # Namespace offset to prevent ID collision between vehicle and ped models
-PED_CONF_THRESHOLD = 0.25  # Higher confidence for pedestrian model (fewer false positives needed)
 
 
 
@@ -399,18 +398,19 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         minute_tracker = MinuteTracker(fps, video_uuid, minute_batch_callback)
         print(f"📊 Enhanced minute tracking enabled for video {video_uuid}")
 
-    # Initialize pedestrian/bicycle model if crosswalks are configured
-    ped_model = None
-    crosswalk_proc = None
-    crosswalk_minute_tracker = None
+    # Initialize pedestrian/bicycle processor if crosswalks are configured
+    ped_processor = None
     if crosswalks_config and pedestrian_model_path:
-        ped_model = YOLO(pedestrian_model_path)
-        print(f"✅ Pedestrian model loaded: {pedestrian_model_path}")
         crosswalk_proc = CrosswalkProcessor(crosswalks_config, fps)
         crosswalk_minute_tracker = CrosswalkMinuteTracker(fps)
-        # Link crosswalk tracker so every batch includes crosswalk data
         if minute_tracker:
             minute_tracker.set_crosswalk_tracker(crosswalk_minute_tracker)
+        ped_processor = PedestrianProcessor(
+            model_path=pedestrian_model_path,
+            crosswalk_proc=crosswalk_proc,
+            crosswalk_minute_tracker=crosswalk_minute_tracker,
+            fps=fps,
+        )
         print(f"🚶 Crosswalk processing enabled with {len(crosswalks_config)} crosswalk(s)")
     elif crosswalks_config and not pedestrian_model_path:
         print(f"⚠️ Crosswalks configured ({len(crosswalks_config)}) but no pedestrian model path provided")
@@ -603,11 +603,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
             # CRITICAL: Reset tracker at start of each period
             reset_tracker()
-            if ped_model is not None and ped_model.predictor is not None:
-                ped_model.predictor.trackers = [None]
-                print("🔄 Pedestrian model tracker reset")
-            if crosswalk_proc is not None:
-                crosswalk_proc.reset_state()
+            if ped_processor is not None:
+                ped_processor.reset_tracker()
+                ped_processor.crosswalk_proc.reset_state()
 
             # Clear previous positions to prevent cross-period tracking
             prev_centroids.clear()
@@ -698,52 +696,20 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                             track_interpolator, counts=counts,
                         )
 
-                # Pedestrian/bicycle model inference
-                if ped_model is not None:
-                    ped_results = ped_model.track(
-                        frame, persist=True, conf=PED_CONF_THRESHOLD, imgsz=IMG_SIZE, verbose=False
-                    )
-                    if ped_results and ped_results[0].boxes is not None and ped_results[0].boxes.id is not None:
-                        ped_ids = ped_results[0].boxes.id.cpu().numpy()
-                        ped_boxes = ped_results[0].boxes.xyxy.cpu().numpy()
-                        ped_classes = ped_results[0].boxes.cls.cpu().numpy()
-
-                        for i, box in enumerate(ped_boxes):
-                            raw_id = int(ped_ids[i])
-                            namespaced_id = PED_TRACK_ID_OFFSET + raw_id
-                            class_name = ped_model.names[int(ped_classes[i])]
-                            if class_name == "person":
-                                class_name = "pedestrian"
-
-                            bbox = box
-                            cx = int((bbox[0] + bbox[2]) / 2)
-                            cy = int(bbox[3])  # Bottom = feet/wheels
-
-                            # Bicycles on the street -> TMC turn logic
-                            if class_name == "bicycle":
-                                process_single_detection(
-                                    namespaced_id, class_name, cx, cy, cx, cy, current_frame,
-                                    prev_wheels, prev_centroids, counted_ids_per_line,
-                                    entry_counted_ids, crossed_lines_by_id, crossing_timestamps,
-                                    turn_types_by_id, detected_classes, class_counts_by_id,
-                                    LINES, DIST_THRESHOLD, point_line_distance,
-                                    is_entering_from_outside, classify_turn_from_lines,
-                                    counts=counts,
-                                )
-
-                            # ALL ped/bike detections -> crosswalk processor
-                            if crosswalk_proc is not None:
-                                crossing_result = crosswalk_proc.process_detection(
-                                    namespaced_id, class_name, cx, cy, current_frame
-                                )
-                                if crossing_result and crosswalk_minute_tracker is not None:
-                                    crosswalk_minute_tracker.record_crossing(
-                                        current_frame,
-                                        crossing_result["entity_id"],
-                                        crossing_result["crosswalk"],
-                                        crossing_result["class"],
-                                        crossing_result["direction"],
-                                    )
+                # Pedestrian/bicycle model inference (delegated to PedestrianProcessor)
+                if ped_processor is not None:
+                    ped_frame_result = ped_processor.process_frame(frame, current_frame)
+                    for bike in ped_frame_result.bicycle_detections:
+                        process_single_detection(
+                            bike.namespaced_id, bike.class_name, bike.cx, bike.cy,
+                            bike.cx, bike.cy, current_frame,
+                            prev_wheels, prev_centroids, counted_ids_per_line,
+                            entry_counted_ids, crossed_lines_by_id, crossing_timestamps,
+                            turn_types_by_id, detected_classes, class_counts_by_id,
+                            LINES, DIST_THRESHOLD, point_line_distance,
+                            is_entering_from_outside, classify_turn_from_lines,
+                            counts=counts,
+                        )
 
                 # Handle missing detections with track interpolation
                 # Clean up old tracks to prevent memory buildup
@@ -799,44 +765,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         cv2.putText(frame, f'{turn_type}: {count}', (20, y_pos),
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-                    # Draw pedestrian/bicycle detections
-                    if ped_model is not None and ped_results and ped_results[0].boxes is not None and ped_results[0].boxes.id is not None:
-                        ped_vis_ids = ped_results[0].boxes.id.cpu().numpy()
-                        ped_vis_boxes = ped_results[0].boxes.xyxy.cpu().numpy()
-                        ped_vis_classes = ped_results[0].boxes.cls.cpu().numpy()
-
-                        for i, box in enumerate(ped_vis_boxes):
-                            x1, y1, x2, y2 = box
-                            cls_name = ped_model.names[int(ped_vis_classes[i])]
-                            if cls_name == "person":
-                                cls_name = "pedestrian"
-                            # Magenta for pedestrians, orange for bicycles
-                            color = (255, 0, 255) if cls_name == "pedestrian" else (0, 165, 255)
-                            cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-                            ped_label = f'{cls_name} #{int(ped_vis_ids[i])}'
-                            cv2.putText(frame, ped_label, (int(x1), int(y1) - 5),
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
-                    # Draw crosswalk boundary lines
-                    if crosswalk_proc is not None:
-                        for cw in crosswalk_proc.crosswalks:
-                            for cw_line in cw.lines:
-                                cv2.line(frame, cw_line.pt1, cw_line.pt2, (255, 0, 255), 2)
-                                mid_x = (cw_line.pt1[0] + cw_line.pt2[0]) // 2
-                                mid_y = (cw_line.pt1[1] + cw_line.pt2[1]) // 2
-                                cv2.putText(frame, f'{cw.name} - {cw_line.name}', (mid_x, mid_y - 10),
-                                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
-
-                        # Draw crosswalk totals in summary overlay
-                        cw_totals = crosswalk_proc.get_totals()
-                        if cw_totals:
-                            y_pos += 30
-                            cv2.putText(frame, 'Crosswalk Counts:', (20, y_pos),
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
-                            for cls_name, total in cw_totals.items():
-                                y_pos += 25
-                                cv2.putText(frame, f'  {cls_name}: {total}', (20, y_pos),
-                                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+                    # Draw pedestrian/bicycle detections and crosswalk overlays
+                    if ped_processor is not None:
+                        y_pos = ped_processor.draw_visualizations(frame, y_pos)
 
                     # Resize frame if needed for compression
                     if width != int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or height != int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)):
@@ -951,52 +882,20 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         track_interpolator, counts=counts,
                     )
 
-            # Pedestrian/bicycle model inference
-            if ped_model is not None:
-                ped_results = ped_model.track(
-                    frame, persist=True, conf=PED_CONF_THRESHOLD, imgsz=IMG_SIZE, verbose=False
-                )
-                if ped_results and ped_results[0].boxes is not None and ped_results[0].boxes.id is not None:
-                    ped_ids = ped_results[0].boxes.id.cpu().numpy()
-                    ped_boxes = ped_results[0].boxes.xyxy.cpu().numpy()
-                    ped_classes = ped_results[0].boxes.cls.cpu().numpy()
-
-                    for i, box in enumerate(ped_boxes):
-                        raw_id = int(ped_ids[i])
-                        namespaced_id = PED_TRACK_ID_OFFSET + raw_id
-                        class_name = ped_model.names[int(ped_classes[i])]
-                        if class_name == "person":
-                            class_name = "pedestrian"
-
-                        bbox = box
-                        cx = int((bbox[0] + bbox[2]) / 2)
-                        cy = int(bbox[3])  # Bottom = feet/wheels
-
-                        # Bicycles on the street -> TMC turn logic
-                        if class_name == "bicycle":
-                            process_single_detection(
-                                namespaced_id, class_name, cx, cy, cx, cy, current_frame,
-                                prev_wheels, prev_centroids, counted_ids_per_line,
-                                entry_counted_ids, crossed_lines_by_id, crossing_timestamps,
-                                turn_types_by_id, detected_classes, class_counts_by_id,
-                                LINES, DIST_THRESHOLD, point_line_distance,
-                                is_entering_from_outside, classify_turn_from_lines,
-                                counts=counts,
-                            )
-
-                        # ALL ped/bike detections -> crosswalk processor
-                        if crosswalk_proc is not None:
-                            crossing_result = crosswalk_proc.process_detection(
-                                namespaced_id, class_name, cx, cy, current_frame
-                            )
-                            if crossing_result and crosswalk_minute_tracker is not None:
-                                crosswalk_minute_tracker.record_crossing(
-                                    current_frame,
-                                    crossing_result["entity_id"],
-                                    crossing_result["crosswalk"],
-                                    crossing_result["class"],
-                                    crossing_result["direction"],
-                                )
+            # Pedestrian/bicycle model inference (delegated to PedestrianProcessor)
+            if ped_processor is not None:
+                ped_frame_result = ped_processor.process_frame(frame, current_frame)
+                for bike in ped_frame_result.bicycle_detections:
+                    process_single_detection(
+                        bike.namespaced_id, bike.class_name, bike.cx, bike.cy,
+                        bike.cx, bike.cy, current_frame,
+                        prev_wheels, prev_centroids, counted_ids_per_line,
+                        entry_counted_ids, crossed_lines_by_id, crossing_timestamps,
+                        turn_types_by_id, detected_classes, class_counts_by_id,
+                        LINES, DIST_THRESHOLD, point_line_distance,
+                        is_entering_from_outside, classify_turn_from_lines,
+                        counts=counts,
+                    )
 
             # Handle missing detections with track interpolation
             # Clean up old tracks to prevent memory buildup
@@ -1052,44 +951,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     cv2.putText(frame, f'{turn_type}: {count}', (20, y_pos),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-                # Draw pedestrian/bicycle detections
-                if ped_model is not None and ped_results and ped_results[0].boxes is not None and ped_results[0].boxes.id is not None:
-                    ped_vis_ids = ped_results[0].boxes.id.cpu().numpy()
-                    ped_vis_boxes = ped_results[0].boxes.xyxy.cpu().numpy()
-                    ped_vis_classes = ped_results[0].boxes.cls.cpu().numpy()
-
-                    for i, box in enumerate(ped_vis_boxes):
-                        x1, y1, x2, y2 = box
-                        cls_name = ped_model.names[int(ped_vis_classes[i])]
-                        if cls_name == "person":
-                            cls_name = "pedestrian"
-                        # Magenta for pedestrians, orange for bicycles
-                        color = (255, 0, 255) if cls_name == "pedestrian" else (0, 165, 255)
-                        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
-                        ped_label = f'{cls_name} #{int(ped_vis_ids[i])}'
-                        cv2.putText(frame, ped_label, (int(x1), int(y1) - 5),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
-                # Draw crosswalk boundary lines
-                if crosswalk_proc is not None:
-                    for cw in crosswalk_proc.crosswalks:
-                        for cw_line in cw.lines:
-                            cv2.line(frame, cw_line.pt1, cw_line.pt2, (255, 0, 255), 2)
-                            mid_x = (cw_line.pt1[0] + cw_line.pt2[0]) // 2
-                            mid_y = (cw_line.pt1[1] + cw_line.pt2[1]) // 2
-                            cv2.putText(frame, f'{cw.name} - {cw_line.name}', (mid_x, mid_y - 10),
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
-
-                    # Draw crosswalk totals in summary overlay
-                    cw_totals = crosswalk_proc.get_totals()
-                    if cw_totals:
-                        y_pos += 30
-                        cv2.putText(frame, 'Crosswalk Counts:', (20, y_pos),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 0, 255), 2)
-                        for cls_name, total in cw_totals.items():
-                            y_pos += 25
-                            cv2.putText(frame, f'  {cls_name}: {total}', (20, y_pos),
-                                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
+                # Draw pedestrian/bicycle detections and crosswalk overlays
+                if ped_processor is not None:
+                    y_pos = ped_processor.draw_visualizations(frame, y_pos)
 
                 # Resize frame if needed for compression
                 if width != int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or height != int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)):
@@ -1155,8 +1019,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # RunPod workers are reused, so memory accumulates if not released
     print("🧹 Releasing YOLO model(s) and GPU memory...")
     del model
-    if ped_model is not None:
-        del ped_model
+    if ped_processor is not None:
+        ped_processor.release()
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -1212,12 +1076,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # Finalize crosswalk tracking
     crosswalk_results = None
     crosswalk_totals = None
-    if crosswalk_proc is not None:
-        crosswalk_results = crosswalk_proc.get_results()
-        crosswalk_totals = crosswalk_proc.get_totals()
-        print(f"🚶 Crosswalk results: {crosswalk_totals}")
-    if crosswalk_minute_tracker is not None:
-        crosswalk_minute_tracker.finalize()
+    if ped_processor is not None:
+        crosswalk_results = ped_processor.get_crosswalk_results()
+        crosswalk_totals = ped_processor.get_crosswalk_totals()
+        ped_processor.finalize_crosswalk_minute_tracker()
 
     return {
         # Original fields (backward compatibility)
