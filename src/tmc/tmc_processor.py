@@ -1,6 +1,9 @@
 import cv2
 import json
+import math
 import time
+import yaml
+import tempfile
 from collections import Counter
 from ultralytics import YOLO
 import numpy as np
@@ -20,10 +23,49 @@ from crosswalk.crosswalk_processor import CrosswalkProcessor
 from crosswalk.crosswalk_minute_tracker import CrosswalkMinuteTracker
 from pedestrian.pedestrian_processor import PedestrianProcessor
 
-CONF_THRESHOLD = 0.01
-IMG_SIZE = 640
+CONF_THRESHOLD = 0.05
 IOU_THRESHOLD = 0.2
 DIST_THRESHOLD = 10
+_BASE_TRACKER_CONFIG = os.path.join(os.path.dirname(__file__), "botsort.yaml")
+_TRACK_BUFFER_SECONDS = 5  # How many seconds to keep lost tracks alive
+
+
+def _compute_img_size(width: int, height: int, cap: int = 1920) -> int:
+    """Choose YOLO imgsz from video resolution, capped and rounded to 32."""
+    longest = max(width, height)
+    size = min(longest, cap)
+    return (size // 32) * 32 or 32
+
+
+def _build_tracker_config(fps: float) -> str:
+    """Read base botsort.yaml, override track_buffer for this video's FPS,
+    and return the path to a temporary YAML file.
+
+    Raises FileNotFoundError if the base config is missing.
+    """
+    if not os.path.isfile(_BASE_TRACKER_CONFIG):
+        raise FileNotFoundError(
+            f"Tracker config not found: {_BASE_TRACKER_CONFIG}. "
+            "Ensure botsort.yaml is packaged with the processor."
+        )
+
+    with open(_BASE_TRACKER_CONFIG) as f:
+        config = yaml.safe_load(f)
+
+    config["track_buffer"] = max(30, int(fps * _TRACK_BUFFER_SECONDS))
+
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".yaml", prefix="botsort_", delete=False,
+    )
+    yaml.dump(config, tmp, default_flow_style=False, sort_keys=False)
+    tmp.close()
+
+    print(f"🔧 Tracker config: track_buffer={config['track_buffer']} "
+          f"({_TRACK_BUFFER_SECONDS}s @ {fps:.1f}fps), "
+          f"with_reid={config.get('with_reid')}, "
+          f"appearance_thresh={config.get('appearance_thresh')}, "
+          f"model={config.get('model')}")
+    return tmp.name
 
 
 
@@ -248,6 +290,23 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     cap = cv2.VideoCapture(VIDEO_PATH)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
+    video_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    video_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+
+    # Fail fast on corrupt video metadata
+    if not fps or fps <= 0 or math.isnan(fps):
+        cap.release()
+        raise ValueError(f"Invalid FPS ({fps}) from video: {VIDEO_PATH}")
+    if video_width <= 0 or video_height <= 0:
+        cap.release()
+        raise ValueError(f"Invalid video dimensions ({video_width}x{video_height}): {VIDEO_PATH}")
+
+    # Compute resolution-aware inference size
+    img_size = _compute_img_size(video_width, video_height)
+    print(f"📐 Video {video_width}x{video_height} → YOLO imgsz={img_size}")
+
+    # Build fps-aware tracker config (temp file — cleaned up in finally block)
+    tracker_config = _build_tracker_config(fps)
 
     # Load YOLO model
     model = YOLO(MODEL_PATH)
@@ -642,7 +701,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
                 # YOLO tracking
                 results = model.track(
-                    frame, persist=True, conf=CONF_THRESHOLD, imgsz=IMG_SIZE, iou=IOU_THRESHOLD, verbose=False
+                    frame, persist=True, conf=CONF_THRESHOLD, imgsz=img_size,
+                    iou=IOU_THRESHOLD, tracker=tracker_config, verbose=False,
                 )
 
                 # Process detections (rest of existing logic)
@@ -829,7 +889,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
             # YOLO tracking
             results = model.track(
-                frame, persist=True, conf=CONF_THRESHOLD, imgsz=IMG_SIZE, iou=IOU_THRESHOLD, verbose=False
+                frame, persist=True, conf=CONF_THRESHOLD, imgsz=img_size,
+                iou=IOU_THRESHOLD, tracker=tracker_config, verbose=False,
             )
 
             if results[0].boxes.id is not None:
@@ -1015,8 +1076,15 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     if video_writer:
         video_writer.release()
 
+    # Clean up temporary tracker config
+    try:
+        os.unlink(tracker_config)
+    except FileNotFoundError:
+        pass
+
     # CRITICAL: Release YOLO model(s) and GPU memory to prevent accumulation
-    # RunPod workers are reused, so memory accumulates if not released
+    # RunPod workers are reused — on exception, the worker process is recycled
+    # and the OS reclaims all resources including the temp file in /tmp.
     print("🧹 Releasing YOLO model(s) and GPU memory...")
     del model
     if ped_processor is not None:
