@@ -12,7 +12,7 @@ Transitions:
     -> direction = first_line_name -> second_line_name
 
 Timeout:
-  CROSSED_FIRST for >30 seconds -> reset to UNCROSSED
+  CROSSED_FIRST for >60 seconds -> reset to UNCROSSED
 """
 
 from enum import Enum
@@ -37,7 +37,7 @@ DIRECTION_MAP = {
     ("WEST_CROSSWALK", "south_line", "north_line"): "Northbound",
 }
 
-CROSSING_TIMEOUT_SECONDS = 30
+CROSSING_TIMEOUT_SECONDS = 60
 DIST_THRESHOLD = 15  # Slightly more generous than vehicle tracking (pedestrians walk slower)
 
 
