@@ -23,7 +23,7 @@ from crosswalk.crosswalk_processor import CrosswalkProcessor
 from crosswalk.crosswalk_minute_tracker import CrosswalkMinuteTracker
 from pedestrian.pedestrian_processor import PedestrianProcessor
 
-CONF_THRESHOLD = 0.05
+CONF_THRESHOLD = 0.15
 IOU_THRESHOLD = 0.2
 DIST_THRESHOLD = 10
 _BASE_TRACKER_CONFIG = os.path.join(os.path.dirname(__file__), "botsort.yaml")
@@ -782,11 +782,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     if results[0].boxes.id is not None:
                         ids = results[0].boxes.id.cpu().numpy()
                         boxes = results[0].boxes.xyxy.cpu().numpy()
+                        vis_classes = results[0].boxes.cls.cpu().numpy()
 
                         for i, box in enumerate(boxes):
                             obj_id = int(ids[i])
                             x1, y1, x2, y2 = box
                             cx, cy = get_centroid(box)
+                            cls_name = class_counts_by_id.get(obj_id, model.names[int(vis_classes[i])])
 
                             # Draw bounding box
                             cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
@@ -794,8 +796,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                             # Draw centroid
                             cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
 
-                            # Draw ID and turn type if available
-                            label = f'ID {obj_id}'
+                            # Draw ID, class, and turn type if available
+                            label = f'{cls_name} ID {obj_id}'
                             if obj_id in turn_types_by_id:
                                 label += f' | {turn_types_by_id[obj_id]}'
                             cv2.putText(frame, label, (cx, cy - 10),
@@ -969,11 +971,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                 if results[0].boxes.id is not None:
                     ids = results[0].boxes.id.cpu().numpy()
                     boxes = results[0].boxes.xyxy.cpu().numpy()
+                    vis_classes = results[0].boxes.cls.cpu().numpy()
 
                     for i, box in enumerate(boxes):
                         obj_id = int(ids[i])
                         x1, y1, x2, y2 = box
                         cx, cy = get_centroid(box)
+                        cls_name = class_counts_by_id.get(obj_id, model.names[int(vis_classes[i])])
 
                         # Draw bounding box
                         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
@@ -981,8 +985,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         # Draw centroid
                         cv2.circle(frame, (cx, cy), 5, (255, 0, 0), -1)
 
-                        # Draw ID and turn type if available
-                        label = f'ID {obj_id}'
+                        # Draw ID, class, and turn type if available
+                        label = f'{cls_name} ID {obj_id}'
                         if obj_id in turn_types_by_id:
                             label += f' | {turn_types_by_id[obj_id]}'
                         cv2.putText(frame, label, (cx, cy - 10),
