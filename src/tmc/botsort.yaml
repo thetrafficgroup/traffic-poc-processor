@@ -15,7 +15,7 @@
 #   gmc_method         sparseOptFlow -> none  Fixed cameras don't need motion compensation
 #   with_reid          False-> True  Appearance features survive shadow zones
 #   appearance_thresh  0.8  -> 0.45  Lower than default to leverage ReID for recovery
-#   model              auto -> osnet_x0_25_msmt17  Pinned for reproducibility
+#   model              auto -> auto  Use detector features for appearance matching
 
 tracker_type: botsort
 
@@ -38,6 +38,6 @@ gmc_method: none
 
 # Re-identification (appearance) model
 with_reid: True
-model: osnet_x0_25_msmt17
+model: auto
 proximity_thresh: 0.5
 appearance_thresh: 0.45
