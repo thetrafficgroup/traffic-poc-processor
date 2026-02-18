@@ -746,7 +746,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     for i, box in enumerate(boxes):
                         obj_id = int(ids[i])
                         class_id = int(classes[i])
-                        class_name = class_counts_by_id.get(obj_id, model.names[class_id])
+                        raw_class_name = model.names[class_id]
+                        if raw_class_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
+                            continue
+                        class_name = class_counts_by_id.get(obj_id, raw_class_name)
                         if class_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                             continue
                         cx, cy = get_centroid(box)
@@ -792,7 +795,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
                         for i, box in enumerate(boxes):
                             obj_id = int(ids[i])
-                            cls_name = class_counts_by_id.get(obj_id, model.names[int(vis_classes[i])])
+                            raw_cls = model.names[int(vis_classes[i])]
+                            if raw_cls in _VEHICLE_MODEL_EXCLUDE_CLASSES:
+                                continue
+                            cls_name = class_counts_by_id.get(obj_id, raw_cls)
                             if cls_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                                 continue
                             x1, y1, x2, y2 = box
@@ -939,7 +945,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                 for i, box in enumerate(boxes):
                     obj_id = int(ids[i])
                     class_id = int(classes[i])
-                    class_name = class_counts_by_id.get(obj_id, model.names[class_id])
+                    raw_class_name = model.names[class_id]
+                    if raw_class_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
+                        continue
+                    class_name = class_counts_by_id.get(obj_id, raw_class_name)
                     if class_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                         continue
                     cx, cy = get_centroid(box)
@@ -985,7 +994,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
                     for i, box in enumerate(boxes):
                         obj_id = int(ids[i])
-                        cls_name = class_counts_by_id.get(obj_id, model.names[int(vis_classes[i])])
+                        raw_cls = model.names[int(vis_classes[i])]
+                        if raw_cls in _VEHICLE_MODEL_EXCLUDE_CLASSES:
+                            continue
+                        cls_name = class_counts_by_id.get(obj_id, raw_cls)
                         if cls_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                             continue
                         x1, y1, x2, y2 = box
