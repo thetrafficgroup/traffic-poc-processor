@@ -29,6 +29,9 @@ DIST_THRESHOLD = 10
 _BASE_TRACKER_CONFIG = os.path.join(os.path.dirname(__file__), "botsort.yaml")
 _TRACK_BUFFER_SECONDS = 5  # How many seconds to keep lost tracks alive
 
+# Classes to exclude from the vehicle model (handled by the pedestrian model instead)
+_VEHICLE_MODEL_EXCLUDE_CLASSES = {"pedestrian", "bicycle", "non-motorized_vehicle"}
+
 
 def _compute_img_size(width: int, height: int, cap: int = 1920) -> int:
     """Choose YOLO imgsz from video resolution, capped and rounded to 32."""
@@ -469,6 +472,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             crosswalk_proc=crosswalk_proc,
             crosswalk_minute_tracker=crosswalk_minute_tracker,
             fps=fps,
+            img_size=img_size,
         )
         print(f"🚶 Crosswalk processing enabled with {len(crosswalks_config)} crosswalk(s)")
     elif crosswalks_config and not pedestrian_model_path:
@@ -743,6 +747,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         obj_id = int(ids[i])
                         class_id = int(classes[i])
                         class_name = class_counts_by_id.get(obj_id, model.names[class_id])
+                        if class_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
+                            continue
                         cx, cy = get_centroid(box)
                         wx, wy = get_wheels_position(box)
 
@@ -786,9 +792,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
                         for i, box in enumerate(boxes):
                             obj_id = int(ids[i])
+                            cls_name = class_counts_by_id.get(obj_id, model.names[int(vis_classes[i])])
+                            if cls_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
+                                continue
                             x1, y1, x2, y2 = box
                             cx, cy = get_centroid(box)
-                            cls_name = class_counts_by_id.get(obj_id, model.names[int(vis_classes[i])])
 
                             # Draw bounding box
                             cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
@@ -932,6 +940,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     obj_id = int(ids[i])
                     class_id = int(classes[i])
                     class_name = class_counts_by_id.get(obj_id, model.names[class_id])
+                    if class_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
+                        continue
                     cx, cy = get_centroid(box)
                     wx, wy = get_wheels_position(box)
 
@@ -975,9 +985,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
                     for i, box in enumerate(boxes):
                         obj_id = int(ids[i])
+                        cls_name = class_counts_by_id.get(obj_id, model.names[int(vis_classes[i])])
+                        if cls_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
+                            continue
                         x1, y1, x2, y2 = box
                         cx, cy = get_centroid(box)
-                        cls_name = class_counts_by_id.get(obj_id, model.names[int(vis_classes[i])])
 
                         # Draw bounding box
                         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
