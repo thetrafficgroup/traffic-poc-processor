@@ -1,0 +1,43 @@
+# Base BoT-SORT tracker config for TMC vehicle tracking.
+#
+# Tuned for intersection analysis where vehicles must be tracked across the
+# full intersection (entry line -> exit line) to classify turns.
+#
+# NOTE: track_buffer is overridden at runtime based on the video's FPS
+# (target: 5 seconds of retention). See _build_tracker_config() in tmc_processor.py.
+#
+# Key changes from ultralytics BoT-SORT defaults:
+#   track_high_thresh  0.25 -> 0.3   Tighter first-stage matching
+#   track_low_thresh   0.1  -> 0.05  More aggressive second-chance recovery
+#   new_track_thresh   0.25 -> 0.35  Moderate evidence to spawn (avoids dead zone with conf=0.05)
+#   track_buffer       30   -> dynamic (fps * 5)  Keep lost tracks alive ~5 seconds
+#   match_thresh       0.8  -> 0.8   Keep default (appearance provides leniency)
+#   gmc_method         sparseOptFlow -> none  Fixed cameras don't need motion compensation
+#   with_reid          False-> True  Appearance features survive shadow zones
+#   appearance_thresh  0.8  -> 0.45  Lower than default to leverage ReID for recovery
+#   model              auto -> auto  Use detector features for appearance matching
+
+tracker_type: botsort
+
+# Detection-to-track matching thresholds
+track_high_thresh: 0.3
+track_low_thresh: 0.05
+new_track_thresh: 0.35
+
+# Lost-track retention (frames). Overridden at runtime to fps * 5.
+track_buffer: 150
+
+# IoU / cost similarity threshold for association
+match_thresh: 0.8
+
+# Fuse detection confidence into the matching cost
+fuse_score: True
+
+# Global motion compensation (fixed camera -> none saves CPU)
+gmc_method: none
+
+# Re-identification (appearance) model
+with_reid: True
+model: auto
+proximity_thresh: 0.5
+appearance_thresh: 0.45
