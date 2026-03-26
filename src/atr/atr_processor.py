@@ -582,6 +582,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                     break
 
                         # Draw bounding box if available
+                        class_name_viz = None
                         if (cx, cy) in detections_map:
                             detection_data = detections_map[(cx, cy)]
                             x1, y1, x2, y2, class_name_viz = detection_data[:5]
@@ -595,7 +596,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         # Draw centroid
                         color = (0, 255, 0) if lane_id is not None else (0, 0, 255)
                         cv2.circle(frame, (cx, cy), 5, color, -1)
-                        cv2.putText(frame, f'ID {objectID} | L{lane_id}', (cx, cy - 10),
+                        label = f'ID {objectID} | L{lane_id}'
+                        if class_name_viz:
+                            label = f'{class_name_viz} {label}'
+                        cv2.putText(frame, label, (cx, cy - 10),
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
                     # Draw finish line
@@ -781,6 +785,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 break
 
                     # Draw bounding box if available
+                    class_name_viz = None
                     if (cx, cy) in detections_map:
                         detection_data = detections_map[(cx, cy)]
                         x1, y1, x2, y2, class_name_viz = detection_data[:5]
@@ -794,7 +799,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     # Draw centroid
                     color = (0, 255, 0) if lane_id is not None else (0, 0, 255)
                     cv2.circle(frame, (cx, cy), 5, color, -1)
-                    cv2.putText(frame, f'ID {objectID} | L{lane_id}', (cx, cy - 10),
+                    label = f'ID {objectID} | L{lane_id}'
+                    if class_name_viz:
+                        label = f'{class_name_viz} {label}'
+                    cv2.putText(frame, label, (cx, cy - 10),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
                 # Draw finish line
