@@ -46,7 +46,9 @@ def normalize_tmc_response(result: Dict[str, Any]) -> Dict[str, Any]:
     total = result.get("total", 0)
     detected_classes = result.get("detected_classes", {})
     validation = result.get("validation", {})
-    vehicles = result.get("vehicles", {})  # NEW: Vehicle class analysis
+    vehicles = result.get("vehicles", {})  # Vehicle class analysis
+    crosswalks = result.get("crosswalks")  # Crosswalk pedestrian/bicycle results
+    crosswalk_totals = result.get("crosswalk_totals")  # Crosswalk total counts
     
     # Ensure all direction counts exist
     direction_counts = {
@@ -105,13 +107,18 @@ def normalize_tmc_response(result: Dict[str, Any]) -> Dict[str, Any]:
             "total_crossings": validation.get("total_crossings", sum(direction_counts.values()))
         },
         
+        # Crosswalk pedestrian/bicycle results
+        "crosswalks": crosswalks,
+        "crosswalk_totals": crosswalk_totals,
+
         # Metadata
         "metadata": {
             "processor": "TMC",
             "has_turn_analysis": True,
             "has_lane_analysis": False,
             "has_direction_analysis": True,
-            "has_vehicle_class_analysis": bool(vehicles)  # Indicate if new analysis is available
+            "has_vehicle_class_analysis": bool(vehicles),
+            "has_crosswalk_analysis": crosswalks is not None
         }
     }
 

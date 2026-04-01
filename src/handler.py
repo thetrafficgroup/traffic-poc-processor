@@ -22,6 +22,7 @@ def handler(event):
     study_type = event["input"].get("study_type", "TMC")  # Default to TMC
     generate_video_output = event["input"].get("generate_video_output", False)  # Default to False
     trim_periods = event["input"].get("trim_periods", None)  # Optional trimming periods
+    pedestrian_model_key = event["input"].get("pedestrian_model_key", None)  # Optional ped/bike model
 
     # Start log capture - all print statements will be captured and uploaded to S3
     log_capture = LogCapture(video_uuid, study_type)
@@ -33,7 +34,8 @@ def handler(event):
             try:
                 result = _process_video_job(
                     event, bucket, video_key, video_uuid, lines_data, model_key,
-                    queue_url, study_type, generate_video_output, trim_periods
+                    queue_url, study_type, generate_video_output, trim_periods,
+                    pedestrian_model_key
                 )
             except Exception as e:
                 # Log the error before it propagates
@@ -59,7 +61,8 @@ def handler(event):
 
 
 def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_key,
-                       queue_url, study_type, generate_video_output, trim_periods):
+                       queue_url, study_type, generate_video_output, trim_periods,
+                       pedestrian_model_key=None):
     """Main video processing logic, separated for cleaner log capture."""
     print("🚀 HANDLER STARTED with event: ", event)  # DEBUG
 
@@ -69,6 +72,12 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
 
     # Download the YOLO model
     model_path = download_s3_file(bucket, model_key, "best.pt")
+
+    # Download pedestrian/bicycle model if provided
+    ped_model_path = None
+    if pedestrian_model_key:
+        ped_model_path = download_s3_file(bucket, pedestrian_model_key, "best_pedestrian.pt")
+        print(f"✅ Pedestrian model downloaded: {ped_model_path}")
 
     def progress_callback(progress_data):
         send_sqs_message(queue_url, {
@@ -111,7 +120,8 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
         minute_batch_callback=minute_batch_callback,
         generate_video_output=generate_video_output,
         output_video_path=output_video_path,
-        trim_periods=trim_periods
+        trim_periods=trim_periods,
+        pedestrian_model_path=ped_model_path
     )
 
     # CRITICAL: Clean up input video file to prevent disk accumulation

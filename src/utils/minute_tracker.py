@@ -18,19 +18,29 @@ class MinuteTracker:
         self.fps = fps
         self.video_uuid = video_uuid
         self.batch_callback = batch_callback
-        
+
         # Tracking state
         self.minute_data: Dict[int, Dict] = {}
         self.current_minute = 0
         self.batch_counter = 0
-        
+
         # Batch configuration
         self.BATCH_SIZE = 5  # Send batch every 5 minutes
-        
+
         # Track processed vehicle IDs per minute to avoid duplicates
         self.processed_vehicles_per_minute: Dict[int, Set[int]] = {}
-        
+
+        # Reference to crosswalk tracker for pulling data before each batch send
+        self._crosswalk_tracker: Optional[Any] = None
+
         print(f"🔄 MinuteTracker initialized for video {video_uuid} with FPS={fps}")
+
+    def set_crosswalk_tracker(self, crosswalk_minute_tracker) -> None:
+        """
+        Set reference to CrosswalkMinuteTracker so crosswalk data is included in every batch.
+        Must be called before processing begins to ensure all batches include crosswalk data.
+        """
+        self._crosswalk_tracker = crosswalk_minute_tracker
     
     def calculate_minute_from_frame(self, frame_number: int) -> int:
         """Calculate which minute a frame belongs to (0-based)."""
@@ -149,16 +159,26 @@ class MinuteTracker:
     def _send_batch(self, minute_numbers: List[int]) -> None:
         """
         Send a batch of minute results via callback.
-        
+        Pulls crosswalk data from the CrosswalkMinuteTracker (if set) before sending.
+
         Args:
             minute_numbers: List of minute numbers to include in batch
         """
         if not self.batch_callback or not minute_numbers:
             return
-        
+
+        # Pull crosswalk data into minute_data before sending
+        if self._crosswalk_tracker is not None:
+            for minute_num in minute_numbers:
+                if minute_num in self.minute_data:
+                    cw_result = self._crosswalk_tracker.get_minute_result(minute_num)
+                    crosswalks = cw_result.get("crosswalks", {})
+                    if crosswalks:
+                        self.minute_data[minute_num]["crosswalks"] = crosswalks
+
         self.batch_counter += 1
         batch_id = f"{self.video_uuid}-batch-{self.batch_counter:03d}"
-        
+
         minute_results = []
         for minute_num in sorted(minute_numbers):
             minute_data = self.minute_data.get(minute_num, {})
