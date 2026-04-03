@@ -261,7 +261,7 @@ def process_single_detection(
     prev_wheels[obj_id] = (wx, wy)
 
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None, progress_callback=None, minute_batch_callback=None, generate_video_output=False, output_video_path=None, trim_periods=None, pedestrian_model_path=None):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None, progress_callback=None, minute_batch_callback=None, generate_video_output=False, output_video_path=None, trim_periods=None, pedestrian_model_path=None, truck_classifier_model_path=None):
     """
     Process video for TMC (Turning Movement Count) analysis with optional trimming.
 
@@ -314,6 +314,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # Load YOLO model
     model = YOLO(MODEL_PATH)
     print(f"✅ YOLO model loaded: {MODEL_PATH}")
+
+    # Load optional truck subtype classifier
+    truck_classifier = None
+    if truck_classifier_model_path:
+        from utils.truck_classifier import TruckClassifier
+        truck_classifier = TruckClassifier(truck_classifier_model_path)
 
     # CRITICAL: Strip crosswalks from LINES_DATA before line-parsing loop.
     # The crosswalks key contains an array, not a dict with pt1/pt2.
@@ -749,6 +755,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         raw_class_name = model.names[class_id]
                         if raw_class_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                             continue
+                        if raw_class_name == "articulated_truck" and truck_classifier and obj_id not in class_counts_by_id:
+                            raw_class_name = truck_classifier.classify(frame, box)
                         class_name = class_counts_by_id.get(obj_id, raw_class_name)
                         if class_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                             continue
@@ -948,6 +956,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     raw_class_name = model.names[class_id]
                     if raw_class_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                         continue
+                    if raw_class_name == "articulated_truck" and truck_classifier and obj_id not in class_counts_by_id:
+                        raw_class_name = truck_classifier.classify(frame, box)
                     class_name = class_counts_by_id.get(obj_id, raw_class_name)
                     if class_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                         continue
