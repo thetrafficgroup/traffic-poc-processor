@@ -130,7 +130,7 @@ def point_side_of_line(p, a, b):
     # Ensure all coordinates are numeric (handle potential float/int mix)
     return (float(b[0]) - float(a[0])) * (float(p[1]) - float(a[1])) - (float(b[1]) - float(a[1])) * (float(p[0]) - float(a[0]))
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None, video_uuid=None, minute_batch_callback=None, trim_periods=None):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None, video_uuid=None, minute_batch_callback=None, trim_periods=None, truck_classifier_model_path=None):
     """
     Process video for ATR (Automatic Traffic Recording) analysis with optional trimming.
 
@@ -168,7 +168,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Load YOLO model
     model = YOLO(MODEL_PATH)
     print(f"✅ YOLO model loaded: {MODEL_PATH}")
-    
+
+    # Load optional truck subtype classifier
+    truck_classifier = None
+    if truck_classifier_model_path:
+        from utils.truck_classifier import TruckClassifier
+        truck_classifier = TruckClassifier(truck_classifier_model_path)
+
     # Process lanes configuration
     lanes = LINES_DATA["lanes"]
     for lane in lanes:
@@ -481,11 +487,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                     # Find class for this detection
                     class_name = "unknown"
+                    matched_detection = None
                     for (det_cx, det_cy), detection_data in detections_map.items():
                         if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
                             if len(detection_data) > 4:  # Has class_name
                                 class_name = detection_data[4]
+                            matched_detection = detection_data
                             break
+
+                    # Refine articulated_truck class on first detection of this track
+                    if class_name == "articulated_truck" and truck_classifier and objectID not in class_counts_by_id and matched_detection:
+                        class_name = truck_classifier.classify(frame, matched_detection[:4])
 
                     # Use persistent class: first detection wins (prevents class flip-flopping)
                     class_name = class_counts_by_id.get(objectID, class_name)
@@ -585,7 +597,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         class_name_viz = None
                         if (cx, cy) in detections_map:
                             detection_data = detections_map[(cx, cy)]
-                            x1, y1, x2, y2, class_name_viz = detection_data[:5]
+                            x1, y1, x2, y2 = detection_data[:4]
+                            class_name_viz = class_counts_by_id.get(objectID, detection_data[4] if len(detection_data) > 4 else None)
                             cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
                             # Draw wheels position if available (for debugging)
@@ -684,11 +697,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                 # Find class for this detection
                 class_name = "unknown"
+                matched_detection = None
                 for (det_cx, det_cy), detection_data in detections_map.items():
                     if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
                         if len(detection_data) > 4:  # Has class_name
                             class_name = detection_data[4]
+                        matched_detection = detection_data
                         break
+
+                # Refine articulated_truck class on first detection of this track
+                if class_name == "articulated_truck" and truck_classifier and objectID not in class_counts_by_id and matched_detection:
+                    class_name = truck_classifier.classify(frame, matched_detection[:4])
 
                 # Use persistent class: first detection wins (prevents class flip-flopping)
                 class_name = class_counts_by_id.get(objectID, class_name)
@@ -788,7 +807,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     class_name_viz = None
                     if (cx, cy) in detections_map:
                         detection_data = detections_map[(cx, cy)]
-                        x1, y1, x2, y2, class_name_viz = detection_data[:5]
+                        x1, y1, x2, y2 = detection_data[:4]
+                        class_name_viz = class_counts_by_id.get(objectID, detection_data[4] if len(detection_data) > 4 else None)
                         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
                         # Draw wheels position if available (for debugging)

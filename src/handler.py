@@ -23,6 +23,7 @@ def handler(event):
     generate_video_output = event["input"].get("generate_video_output", False)  # Default to False
     trim_periods = event["input"].get("trim_periods", None)  # Optional trimming periods
     pedestrian_model_key = event["input"].get("pedestrian_model_key", None)  # Optional ped/bike model
+    truck_classifier_model_key = event["input"].get("truck_classifier_model_key", None)  # Optional truck subtype classifier
 
     # Start log capture - all print statements will be captured and uploaded to S3
     log_capture = LogCapture(video_uuid, study_type)
@@ -35,7 +36,7 @@ def handler(event):
                 result = _process_video_job(
                     event, bucket, video_key, video_uuid, lines_data, model_key,
                     queue_url, study_type, generate_video_output, trim_periods,
-                    pedestrian_model_key
+                    pedestrian_model_key, truck_classifier_model_key
                 )
             except Exception as e:
                 # Log the error before it propagates
@@ -62,7 +63,7 @@ def handler(event):
 
 def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_key,
                        queue_url, study_type, generate_video_output, trim_periods,
-                       pedestrian_model_key=None):
+                       pedestrian_model_key=None, truck_classifier_model_key=None):
     """Main video processing logic, separated for cleaner log capture."""
     print("🚀 HANDLER STARTED with event: ", event)  # DEBUG
 
@@ -78,6 +79,15 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
     if pedestrian_model_key:
         ped_model_path = download_s3_file(bucket, pedestrian_model_key, "best_pedestrian.pt")
         print(f"✅ Pedestrian model downloaded: {ped_model_path}")
+
+    # Download truck classifier model (explicit key or fallback to known path)
+    truck_classifier_model_path = None
+    tc_key = truck_classifier_model_key or "models/best_truck_classifier.pt"
+    try:
+        truck_classifier_model_path = download_s3_file(bucket, tc_key, "best_truck_classifier.pt")
+        print(f"✅ Truck classifier model downloaded: {truck_classifier_model_path}")
+    except Exception:
+        print("ℹ️ No truck classifier model found, skipping truck subtype classification")
 
     def progress_callback(progress_data):
         send_sqs_message(queue_url, {
@@ -121,7 +131,8 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
         generate_video_output=generate_video_output,
         output_video_path=output_video_path,
         trim_periods=trim_periods,
-        pedestrian_model_path=ped_model_path
+        pedestrian_model_path=ped_model_path,
+        truck_classifier_model_path=truck_classifier_model_path
     )
 
     # CRITICAL: Clean up input video file to prevent disk accumulation
