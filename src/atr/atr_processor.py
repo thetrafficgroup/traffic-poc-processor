@@ -130,7 +130,7 @@ def point_side_of_line(p, a, b):
     # Ensure all coordinates are numeric (handle potential float/int mix)
     return (float(b[0]) - float(a[0])) * (float(p[1]) - float(a[1])) - (float(b[1]) - float(a[1])) * (float(p[0]) - float(a[0]))
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None, video_uuid=None, minute_batch_callback=None, trim_periods=None):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None, video_uuid=None, minute_batch_callback=None, trim_periods=None, truck_classifier_model_path=None):
     """
     Process video for ATR (Automatic Traffic Recording) analysis with optional trimming.
 
@@ -168,7 +168,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Load YOLO model
     model = YOLO(MODEL_PATH)
     print(f"✅ YOLO model loaded: {MODEL_PATH}")
-    
+
+    # Load optional truck subtype classifier
+    truck_classifier = None
+    if truck_classifier_model_path:
+        from utils.truck_classifier import TruckClassifier
+        truck_classifier = TruckClassifier(truck_classifier_model_path)
+
     # Process lanes configuration
     lanes = LINES_DATA["lanes"]
     for lane in lanes:
@@ -481,11 +487,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                     # Find class for this detection
                     class_name = "unknown"
+                    matched_detection = None
                     for (det_cx, det_cy), detection_data in detections_map.items():
                         if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
                             if len(detection_data) > 4:  # Has class_name
                                 class_name = detection_data[4]
+                            matched_detection = detection_data
                             break
+
+                    # Refine articulated_truck class on first detection of this track
+                    if class_name == "articulated_truck" and truck_classifier and objectID not in class_counts_by_id and matched_detection:
+                        class_name = truck_classifier.classify(frame, matched_detection[:4])
 
                     # Use persistent class: first detection wins (prevents class flip-flopping)
                     class_name = class_counts_by_id.get(objectID, class_name)
@@ -517,7 +529,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     if objectID not in previous_positions:
                         previous_positions[objectID] = []
 
-                    previous_positions[objectID].append((cx, cy))
+                    # Use wheels (bottom-center) for finish line crossing, consistent with lane detection
+                    crossing_point = (wheels_x, wheels_y) if wheels_x is not None else (cx, cy)
+                    previous_positions[objectID].append(crossing_point)
                     # Keep only last 10 positions to prevent unbounded memory growth
                     if len(previous_positions[objectID]) > 10:
                         previous_positions[objectID] = previous_positions[objectID][-10:]
@@ -581,11 +595,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                     lane_id = lid
                                     break
 
-                        # Draw bounding box if available
-                        class_name_viz = None
+                        # Draw bounding box and label only when detection is available
                         if (cx, cy) in detections_map:
                             detection_data = detections_map[(cx, cy)]
-                            x1, y1, x2, y2, class_name_viz = detection_data[:5]
+                            x1, y1, x2, y2 = detection_data[:4]
+                            class_name_viz = class_counts_by_id.get(objectID, detection_data[4] if len(detection_data) > 4 else None)
                             cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
                             # Draw wheels position if available (for debugging)
@@ -593,14 +607,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 wx, wy = detection_data[5], detection_data[6]
                                 cv2.circle(frame, (int(wx), int(wy)), 3, (255, 0, 0), -1)  # Blue for wheels
 
-                        # Draw centroid
-                        color = (0, 255, 0) if lane_id is not None else (0, 0, 255)
-                        cv2.circle(frame, (cx, cy), 5, color, -1)
-                        label = f'ID {objectID} | L{lane_id}'
-                        if class_name_viz:
-                            label = f'{class_name_viz} {label}'
-                        cv2.putText(frame, label, (cx, cy - 10),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                            label = f'ID {objectID} | L{lane_id}'
+                            if class_name_viz:
+                                label = f'{class_name_viz} {label}'
+                            cv2.putText(frame, label, (int(x1), int(y1) - 10),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
                     # Draw finish line
                     if finish_line is not None and len(finish_line) == 2:
@@ -684,11 +695,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                 # Find class for this detection
                 class_name = "unknown"
+                matched_detection = None
                 for (det_cx, det_cy), detection_data in detections_map.items():
                     if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
                         if len(detection_data) > 4:  # Has class_name
                             class_name = detection_data[4]
+                        matched_detection = detection_data
                         break
+
+                # Refine articulated_truck class on first detection of this track
+                if class_name == "articulated_truck" and truck_classifier and objectID not in class_counts_by_id and matched_detection:
+                    class_name = truck_classifier.classify(frame, matched_detection[:4])
 
                 # Use persistent class: first detection wins (prevents class flip-flopping)
                 class_name = class_counts_by_id.get(objectID, class_name)
@@ -785,10 +802,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 break
 
                     # Draw bounding box if available
-                    class_name_viz = None
+                    # Draw bounding box and label only when detection is available
                     if (cx, cy) in detections_map:
                         detection_data = detections_map[(cx, cy)]
-                        x1, y1, x2, y2, class_name_viz = detection_data[:5]
+                        x1, y1, x2, y2 = detection_data[:4]
+                        class_name_viz = class_counts_by_id.get(objectID, detection_data[4] if len(detection_data) > 4 else None)
                         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
                         # Draw wheels position if available (for debugging)
@@ -796,14 +814,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             wx, wy = detection_data[5], detection_data[6]
                             cv2.circle(frame, (int(wx), int(wy)), 3, (255, 0, 0), -1)  # Blue for wheels
 
-                    # Draw centroid
-                    color = (0, 255, 0) if lane_id is not None else (0, 0, 255)
-                    cv2.circle(frame, (cx, cy), 5, color, -1)
-                    label = f'ID {objectID} | L{lane_id}'
-                    if class_name_viz:
-                        label = f'{class_name_viz} {label}'
-                    cv2.putText(frame, label, (cx, cy - 10),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                        label = f'ID {objectID} | L{lane_id}'
+                        if class_name_viz:
+                            label = f'{class_name_viz} {label}'
+                        cv2.putText(frame, label, (int(x1), int(y1) - 10),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
                 # Draw finish line
                 if finish_line is not None and len(finish_line) == 2:
