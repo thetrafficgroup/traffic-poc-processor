@@ -529,7 +529,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     if objectID not in previous_positions:
                         previous_positions[objectID] = []
 
-                    previous_positions[objectID].append((cx, cy))
+                    # Use wheels (bottom-center) for finish line crossing, consistent with lane detection
+                    crossing_point = (wheels_x, wheels_y) if wheels_x is not None else (cx, cy)
+                    previous_positions[objectID].append(crossing_point)
                     # Keep only last 10 positions to prevent unbounded memory growth
                     if len(previous_positions[objectID]) > 10:
                         previous_positions[objectID] = previous_positions[objectID][-10:]
