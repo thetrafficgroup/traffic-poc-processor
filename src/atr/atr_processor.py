@@ -595,8 +595,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                     lane_id = lid
                                     break
 
-                        # Draw bounding box if available
-                        class_name_viz = None
+                        # Draw bounding box and label only when detection is available
                         if (cx, cy) in detections_map:
                             detection_data = detections_map[(cx, cy)]
                             x1, y1, x2, y2 = detection_data[:4]
@@ -608,14 +607,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 wx, wy = detection_data[5], detection_data[6]
                                 cv2.circle(frame, (int(wx), int(wy)), 3, (255, 0, 0), -1)  # Blue for wheels
 
-                        # Draw centroid
-                        color = (0, 255, 0) if lane_id is not None else (0, 0, 255)
-                        cv2.circle(frame, (cx, cy), 5, color, -1)
-                        label = f'ID {objectID} | L{lane_id}'
-                        if class_name_viz:
-                            label = f'{class_name_viz} {label}'
-                        cv2.putText(frame, label, (cx, cy - 10),
-                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                            label = f'ID {objectID} | L{lane_id}'
+                            if class_name_viz:
+                                label = f'{class_name_viz} {label}'
+                            cv2.putText(frame, label, (int(x1), int(y1) - 10),
+                                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
                     # Draw finish line
                     if finish_line is not None and len(finish_line) == 2:
@@ -806,7 +802,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 break
 
                     # Draw bounding box if available
-                    class_name_viz = None
+                    # Draw bounding box and label only when detection is available
                     if (cx, cy) in detections_map:
                         detection_data = detections_map[(cx, cy)]
                         x1, y1, x2, y2 = detection_data[:4]
@@ -818,14 +814,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             wx, wy = detection_data[5], detection_data[6]
                             cv2.circle(frame, (int(wx), int(wy)), 3, (255, 0, 0), -1)  # Blue for wheels
 
-                    # Draw centroid
-                    color = (0, 255, 0) if lane_id is not None else (0, 0, 255)
-                    cv2.circle(frame, (cx, cy), 5, color, -1)
-                    label = f'ID {objectID} | L{lane_id}'
-                    if class_name_viz:
-                        label = f'{class_name_viz} {label}'
-                    cv2.putText(frame, label, (cx, cy - 10),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
+                        label = f'ID {objectID} | L{lane_id}'
+                        if class_name_viz:
+                            label = f'{class_name_viz} {label}'
+                        cv2.putText(frame, label, (int(x1), int(y1) - 10),
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
 
                 # Draw finish line
                 if finish_line is not None and len(finish_line) == 2:
