@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import json
 import time
-from shapely.geometry import Point, Polygon, box as shapely_box
+from shapely.geometry import Point, Polygon, LineString, box as shapely_box
 from ultralytics import YOLO
 from collections import OrderedDict, Counter
 from .atr_minute_tracker import ATRMinuteTracker
@@ -106,15 +106,28 @@ def find_vehicle_lane(cx, cy, wx, wy, lane_polygons_buffered, bbox=None):
         if poly.covers(centroid_point):
             return lane_id
 
-    # Priority 3: bottom-band intersection (bottom 25% of bbox)
     if bbox is not None:
         x1, y1, x2, y2 = bbox
+
+        # Priority 3: bottom-band intersection (bottom 25% of bbox)
         band_top = y2 - (y2 - y1) * 0.25
         bottom_band = shapely_box(x1, band_top, x2, y2)
         best_lane, best_area = None, 0
         for lane_id, poly in lane_polygons_buffered:
             if poly.intersects(bottom_band):
                 area = poly.intersection(bottom_band).area
+                if area > best_area:
+                    best_area = area
+                    best_lane = lane_id
+        if best_lane is not None:
+            return best_lane
+
+        # Priority 4: full bbox intersection (largest overlap wins)
+        full_bbox = shapely_box(x1, y1, x2, y2)
+        best_lane, best_area = None, 0
+        for lane_id, poly in lane_polygons_buffered:
+            if poly.intersects(full_bbox):
+                area = poly.intersection(full_bbox).area
                 if area > best_area:
                     best_area = area
                     best_lane = lane_id
@@ -199,7 +212,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     finish_line = LINES_DATA.get("finish_line")
     if finish_line and isinstance(finish_line[0], dict):
         finish_line = dict_points_to_tuples(finish_line)
-    
+    finish_linestring = LineString(finish_line) if finish_line and len(finish_line) == 2 else None
+
     # Initialize tracking variables
     counted_ids = set()
     previous_positions = {}
@@ -584,19 +598,26 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         previous_positions[objectID] = previous_positions[objectID][-10:]
 
                     # Check finish line crossing
-                    if (
-                        objectID not in counted_ids and
-                        lane_id is not None and
-                        finish_line is not None and
-                        len(previous_positions[objectID]) >= 2
-                    ):
-                        a, b = finish_line
-                        prev = previous_positions[objectID][-2]
-                        curr = previous_positions[objectID][-1]
-                        side_prev = point_side_of_line(prev, a, b)
-                        side_curr = point_side_of_line(curr, a, b)
+                    if objectID not in counted_ids and lane_id is not None and finish_line is not None:
+                        crossed = False
 
-                        if side_prev * side_curr < 0:  # Changed sides
+                        # Primary: bbox intersects finish line
+                        if bbox is not None and finish_linestring is not None:
+                            bbox_poly = shapely_box(bbox[0], bbox[1], bbox[2], bbox[3])
+                            if bbox_poly.intersects(finish_linestring):
+                                crossed = True
+
+                        # Fallback: point sign-change (when no bbox available)
+                        if not crossed and len(previous_positions[objectID]) >= 2:
+                            a, b = finish_line
+                            prev = previous_positions[objectID][-2]
+                            curr = previous_positions[objectID][-1]
+                            side_prev = point_side_of_line(prev, a, b)
+                            side_curr = point_side_of_line(curr, a, b)
+                            if side_prev * side_curr < 0:
+                                crossed = True
+
+                        if crossed:
                             counted_ids.add(objectID)
                             lane_counts[lane_id] += 1
 
@@ -777,19 +798,26 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     previous_positions[objectID] = previous_positions[objectID][-10:]
 
                 # Check finish line crossing
-                if (
-                    objectID not in counted_ids and
-                    lane_id is not None and
-                    finish_line is not None and
-                    len(previous_positions[objectID]) >= 2
-                ):
-                    a, b = finish_line
-                    prev = previous_positions[objectID][-2]
-                    curr = previous_positions[objectID][-1]
-                    side_prev = point_side_of_line(prev, a, b)
-                    side_curr = point_side_of_line(curr, a, b)
+                if objectID not in counted_ids and lane_id is not None and finish_line is not None:
+                    crossed = False
 
-                    if side_prev * side_curr < 0:  # Changed sides
+                    # Primary: bbox intersects finish line
+                    if bbox is not None and finish_linestring is not None:
+                        bbox_poly = shapely_box(bbox[0], bbox[1], bbox[2], bbox[3])
+                        if bbox_poly.intersects(finish_linestring):
+                            crossed = True
+
+                    # Fallback: point sign-change (when no bbox available)
+                    if not crossed and len(previous_positions[objectID]) >= 2:
+                        a, b = finish_line
+                        prev = previous_positions[objectID][-2]
+                        curr = previous_positions[objectID][-1]
+                        side_prev = point_side_of_line(prev, a, b)
+                        side_curr = point_side_of_line(curr, a, b)
+                        if side_prev * side_curr < 0:
+                            crossed = True
+
+                    if crossed:
                         counted_ids.add(objectID)
                         lane_counts[lane_id] += 1
 
