@@ -89,6 +89,16 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
     except Exception:
         print("ℹ️ No truck classifier model found, skipping truck subtype classification")
 
+    # Download rear-facing model if available (for ATR auto-orientation detection)
+    rear_model_path = None
+    if study_type.upper() == "ATR":
+        rear_model_key = "models/best_rear.pt"
+        try:
+            rear_model_path = download_s3_file(bucket, rear_model_key, "best_rear.pt")
+            print(f"✅ Rear model downloaded: {rear_model_path}")
+        except Exception:
+            print("ℹ️ No rear model found, skipping orientation auto-detection")
+
     def progress_callback(progress_data):
         send_sqs_message(queue_url, {
             "videoUuid": video_uuid,
@@ -132,7 +142,8 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
         output_video_path=output_video_path,
         trim_periods=trim_periods,
         pedestrian_model_path=ped_model_path,
-        truck_classifier_model_path=truck_classifier_model_path
+        truck_classifier_model_path=truck_classifier_model_path,
+        rear_model_path=rear_model_path
     )
 
     # CRITICAL: Clean up input video file to prevent disk accumulation

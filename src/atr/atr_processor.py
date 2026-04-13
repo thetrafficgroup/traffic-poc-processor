@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import json
 import time
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Point, Polygon, box as shapely_box
 from ultralytics import YOLO
 from collections import OrderedDict, Counter
 from .atr_minute_tracker import ATRMinuteTracker
@@ -16,11 +16,12 @@ from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim
 
 # === Centroid Tracker ===
 class CentroidTracker:
-    def __init__(self, max_disappeared=15):
+    def __init__(self, max_disappeared=15, max_distance=150):
         self.nextObjectID = 0
         self.objects = OrderedDict()
         self.disappeared = OrderedDict()
         self.max_disappeared = max_disappeared
+        self.max_distance = max_distance
 
     def register(self, centroid):
         self.objects[self.nextObjectID] = centroid
@@ -55,6 +56,8 @@ class CentroidTracker:
             for (row, col) in zip(rows, cols):
                 if row in used_rows or col in used_cols:
                     continue
+                if D[row, col] > self.max_distance:
+                    continue
                 objectID = objectIDs[row]
                 self.objects[objectID] = input_centroids[col]
                 self.disappeared[objectID] = 0
@@ -85,26 +88,38 @@ def get_wheels_position(box):
     # Wheels are at the bottom center of the vehicle
     return int((x1 + x2) / 2), int(y2)
 
-def find_vehicle_lane(centroid_x, centroid_y, wheels_x, wheels_y, lane_polygons_buffered):
+def find_vehicle_lane(cx, cy, wx, wy, lane_polygons_buffered, bbox=None):
     """
     Find vehicle lane using wheels-priority approach.
-    First checks wheel position, falls back to centroid if no match.
-    
-    Returns:
-        lane_id or None
+    Falls back to centroid, then bottom-band intersection for large bboxes.
     """
-    # Priority 1: Check wheels position
-    wheels_point = Point(wheels_x, wheels_y)
-    for lane_id, buffered_polygon in lane_polygons_buffered:
-        if buffered_polygon.contains(wheels_point):
+    # Priority 1: wheels position
+    if wx is not None and wy is not None:
+        wheels_point = Point(wx, wy)
+        for lane_id, poly in lane_polygons_buffered:
+            if poly.covers(wheels_point):
+                return lane_id
+
+    # Priority 2: centroid
+    centroid_point = Point(cx, cy)
+    for lane_id, poly in lane_polygons_buffered:
+        if poly.covers(centroid_point):
             return lane_id
-    
-    # Priority 2: Fallback to centroid
-    centroid_point = Point(centroid_x, centroid_y)
-    for lane_id, buffered_polygon in lane_polygons_buffered:
-        if buffered_polygon.contains(centroid_point):
-            return lane_id
-    
+
+    # Priority 3: bottom-band intersection (bottom 25% of bbox)
+    if bbox is not None:
+        x1, y1, x2, y2 = bbox
+        band_top = y2 - (y2 - y1) * 0.25
+        bottom_band = shapely_box(x1, band_top, x2, y2)
+        best_lane, best_area = None, 0
+        for lane_id, poly in lane_polygons_buffered:
+            if poly.intersects(bottom_band):
+                area = poly.intersection(bottom_band).area
+                if area > best_area:
+                    best_area = area
+                    best_lane = lane_id
+        return best_lane
+
     return None
 
 def dict_points_to_tuples(points):
@@ -130,7 +145,7 @@ def point_side_of_line(p, a, b):
     # Ensure all coordinates are numeric (handle potential float/int mix)
     return (float(b[0]) - float(a[0])) * (float(p[1]) - float(a[1])) - (float(b[1]) - float(a[1])) * (float(p[0]) - float(a[0]))
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None, video_uuid=None, minute_batch_callback=None, trim_periods=None, truck_classifier_model_path=None):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None, video_uuid=None, minute_batch_callback=None, trim_periods=None, truck_classifier_model_path=None, rear_model_path=None):
     """
     Process video for ATR (Automatic Traffic Recording) analysis with optional trimming.
 
@@ -165,10 +180,6 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
 
-    # Load YOLO model
-    model = YOLO(MODEL_PATH)
-    print(f"✅ YOLO model loaded: {MODEL_PATH}")
-
     # Load optional truck subtype classifier
     truck_classifier = None
     if truck_classifier_model_path:
@@ -192,6 +203,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Initialize tracking variables
     counted_ids = set()
     previous_positions = {}
+    last_known_lane = {}
     tracker = CentroidTracker(max_disappeared=15)
     
     # Debug counters
@@ -228,6 +240,43 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Calculate total_processing_frames for normal mode too (for unified progress calculation)
     if not frame_ranges:
         total_processing_frames = total_frames
+
+    # Auto-detect vehicle orientation if rear model is available
+    orientation_result = None
+    if rear_model_path:
+        from .orientation_detector import detect_vehicle_orientation
+
+        cal_start_frame = 0
+        if frame_ranges:
+            cal_start_frame = frame_ranges[0]["start_frame"]
+
+        print("🔍 Running vehicle orientation calibration...")
+        orientation_result = detect_vehicle_orientation(
+            VIDEO_PATH, MODEL_PATH, fps,
+            calibration_seconds=30, min_vehicles=3,
+            start_frame=cal_start_frame
+        )
+
+        print(f"🔍 Orientation result: {orientation_result['orientation']} "
+              f"(confidence={orientation_result['confidence']:.2f}, "
+              f"vehicles={orientation_result['vehicles_analyzed']})")
+
+        # Load the appropriate model based on calibration result
+        if orientation_result["orientation"] == "rear":
+            model = YOLO(rear_model_path)
+            print(f"✅ Rear YOLO model loaded: {rear_model_path}")
+        else:
+            model = YOLO(MODEL_PATH)
+            print(f"✅ Front YOLO model loaded: {MODEL_PATH}")
+
+        # Re-open video capture to reset frame position after calibration consumed frames
+        cap.release()
+        cap = cv2.VideoCapture(VIDEO_PATH)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+    else:
+        model = YOLO(MODEL_PATH)
+        print(f"✅ YOLO model loaded: {MODEL_PATH}")
 
     # Initialize minute tracker if callback provided
     minute_tracker = None
@@ -332,8 +381,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     def reset_centroid_tracker():
         """Reset CentroidTracker to start fresh tracking for new period"""
         nonlocal tracker
+        next_id = tracker.nextObjectID
         tracker = CentroidTracker(max_disappeared=15)
-        print("🔄 ATR CentroidTracker reset - previous tracking state cleared")
+        tracker.nextObjectID = next_id
+        print(f"🔄 ATR CentroidTracker reset (nextObjectID={next_id}) - previous tracking state cleared")
 
     # Helper function for progress calculation
     def calculate_and_send_progress():
@@ -424,9 +475,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             # CRITICAL: Reset tracker at start of each period
             reset_centroid_tracker()
 
-            # Clear previous positions to prevent cross-period tracking
+            # Clear per-track state to prevent cross-period tracking
             previous_positions.clear()
-            print("🧹 Previous positions cleared for new period")
+            last_known_lane.clear()
+            print("🧹 Per-track state cleared for new period")
 
             # Skip frames until we reach the start of this period (frame-skipping)
             ret = True  # Initialize to True - if no seeking needed, we're already at the right position
@@ -482,15 +534,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 for objectID, centroid in objects.items():
                     debug_tracked_objects.add(objectID)
                     cx, cy = centroid
-                    pt = Point(cx, cy)
-                    lane_id = None
 
-                    # Find class for this detection
+                    # Match to detection data
                     class_name = "unknown"
                     matched_detection = None
                     for (det_cx, det_cy), detection_data in detections_map.items():
-                        if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
-                            if len(detection_data) > 4:  # Has class_name
+                        if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
+                            if len(detection_data) > 4:
                                 class_name = detection_data[4]
                             matched_detection = detection_data
                             break
@@ -501,28 +551,25 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                     # Use persistent class: first detection wins (prevents class flip-flopping)
                     class_name = class_counts_by_id.get(objectID, class_name)
-                    # Store class for this object ID (only if not already stored)
                     if objectID not in class_counts_by_id:
                         class_counts_by_id[objectID] = class_name
 
-                    # Find which lane the object is in using wheels-priority approach
+                    # Extract wheels and bbox from matched detection
                     wheels_x, wheels_y = None, None
-                    # Extract wheels position from detection data if available
-                    for (det_cx, det_cy), detection_data in detections_map.items():
-                        if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
-                            if len(detection_data) > 6:  # Has wheels coordinates
-                                wheels_x, wheels_y = detection_data[5], detection_data[6]
-                            break
+                    bbox = None
+                    if matched_detection:
+                        bbox = matched_detection[:4]
+                        if len(matched_detection) > 6:
+                            wheels_x, wheels_y = matched_detection[5], matched_detection[6]
 
-                    # Use wheels-priority detection if wheels data available
-                    if wheels_x is not None and wheels_y is not None:
-                        lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered)
-                    else:
-                        # Fallback to original centroid-only method for compatibility
-                        for lid, buffered_polygon in lane_polygons_buffered:
-                            if buffered_polygon.contains(pt):
-                                lane_id = lid
-                                break
+                    # Find lane (wheels → centroid → bottom-band fallback)
+                    lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)
+
+                    # Sticky lane: remember last known lane, use as fallback
+                    if lane_id is not None:
+                        last_known_lane[objectID] = lane_id
+                    elif objectID in last_known_lane:
+                        lane_id = last_known_lane[objectID]
 
                     # Initialize position history with bounded size to prevent memory accumulation
                     # CRITICAL: Limit to last 10 positions - we only need recent history for line crossing
@@ -564,11 +611,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             if minute_tracker:
                                 minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
 
-                            # Clean up position history for counted vehicle to free memory
+                            # Clean up per-track state for counted vehicle to free memory
                             del previous_positions[objectID]
-
-                            # Detection logging removed for cleaner logs
-                            # print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
+                            last_known_lane.pop(objectID, None)
 
                 # Add visualizations if generating output video
                 if generate_video_output and video_writer:
@@ -576,24 +621,16 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     for objectID, centroid in objects.items():
                         cx, cy = int(centroid[0]), int(centroid[1])
 
-                        # Find lane for this object using wheels-priority approach
-                        pt = Point(cx, cy)
-                        lane_id = None
-                        # Try to get wheels position from detections_map
+                        # Find lane for visualization
                         wheels_x, wheels_y = None, None
+                        bbox = None
                         for (det_cx, det_cy), detection_data in detections_map.items():
                             if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
+                                bbox = detection_data[:4]
                                 if len(detection_data) > 6:
                                     wheels_x, wheels_y = detection_data[5], detection_data[6]
                                 break
-
-                        if wheels_x is not None and wheels_y is not None:
-                            lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered)
-                        else:
-                            for lid, buffered_polygon in lane_polygons_buffered:
-                                if buffered_polygon.contains(pt):
-                                    lane_id = lid
-                                    break
+                        lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)
 
                         # Draw bounding box and label only when detection is available
                         if (cx, cy) in detections_map:
@@ -690,15 +727,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             for objectID, centroid in objects.items():
                 debug_tracked_objects.add(objectID)
                 cx, cy = centroid
-                pt = Point(cx, cy)
-                lane_id = None
 
-                # Find class for this detection
+                # Match to detection data
                 class_name = "unknown"
                 matched_detection = None
                 for (det_cx, det_cy), detection_data in detections_map.items():
-                    if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
-                        if len(detection_data) > 4:  # Has class_name
+                    if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
+                        if len(detection_data) > 4:
                             class_name = detection_data[4]
                         matched_detection = detection_data
                         break
@@ -709,28 +744,25 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                 # Use persistent class: first detection wins (prevents class flip-flopping)
                 class_name = class_counts_by_id.get(objectID, class_name)
-                # Store class for this object ID (only if not already stored)
                 if objectID not in class_counts_by_id:
                     class_counts_by_id[objectID] = class_name
 
-                # Find which lane the object is in using wheels-priority approach
+                # Extract wheels and bbox from matched detection
                 wheels_x, wheels_y = None, None
-                # Extract wheels position from detection data if available
-                for (det_cx, det_cy), detection_data in detections_map.items():
-                    if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
-                        if len(detection_data) > 6:  # Has wheels coordinates
-                            wheels_x, wheels_y = detection_data[5], detection_data[6]
-                        break
+                bbox = None
+                if matched_detection:
+                    bbox = matched_detection[:4]
+                    if len(matched_detection) > 6:
+                        wheels_x, wheels_y = matched_detection[5], matched_detection[6]
 
-                # Use wheels-priority detection if wheels data available
-                if wheels_x is not None and wheels_y is not None:
-                    lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered)
-                else:
-                    # Fallback to original centroid-only method for compatibility
-                    for lid, buffered_polygon in lane_polygons_buffered:
-                        if buffered_polygon.contains(pt):
-                            lane_id = lid
-                            break
+                # Find lane (wheels → centroid → bottom-band fallback)
+                lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)
+
+                # Sticky lane: remember last known lane, use as fallback
+                if lane_id is not None:
+                    last_known_lane[objectID] = lane_id
+                elif objectID in last_known_lane:
+                    lane_id = last_known_lane[objectID]
 
                 # Initialize position history with bounded size to prevent memory accumulation
                 # CRITICAL: Limit to last 10 positions - we only need recent history for line crossing
@@ -772,11 +804,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         if minute_tracker:
                             minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
 
-                        # Clean up position history for counted vehicle to free memory
+                        # Clean up per-track state for counted vehicle to free memory
                         del previous_positions[objectID]
-
-                        # Detection logging removed for cleaner logs
-                        # print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
+                        last_known_lane.pop(objectID, None)
 
             # Add visualizations if generating output video
             if generate_video_output and video_writer:
@@ -784,26 +814,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 for objectID, centroid in objects.items():
                     cx, cy = int(centroid[0]), int(centroid[1])
 
-                    # Find lane for this object using wheels-priority approach
-                    pt = Point(cx, cy)
-                    lane_id = None
-                    # Try to get wheels position from detections_map
+                    # Find lane for visualization
                     wheels_x, wheels_y = None, None
+                    bbox = None
                     for (det_cx, det_cy), detection_data in detections_map.items():
                         if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
+                            bbox = detection_data[:4]
                             if len(detection_data) > 6:
                                 wheels_x, wheels_y = detection_data[5], detection_data[6]
                             break
+                    lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)
 
-                    if wheels_x is not None and wheels_y is not None:
-                        lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered)
-                    else:
-                        for lid, buffered_polygon in lane_polygons_buffered:
-                            if buffered_polygon.contains(pt):
-                                lane_id = lid
-                                break
-
-                    # Draw bounding box if available
                     # Draw bounding box and label only when detection is available
                     if (cx, cy) in detections_map:
                         detection_data = detections_map[(cx, cy)]
@@ -904,10 +925,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     for class_name, lane_data in vehicle_counts_by_lane.items():
         detected_classes_summary[class_name] = sum(lane_data.values())
 
-    return {
+    result = {
         "lane_counts": lane_counts,
         "total_count": total_count,
         "study_type": "ATR",
         "detected_classes": detected_classes_summary,  # Raw detection labels with counts
         "vehicles": vehicles_by_class  # Raw detection labels by lane: {class_name: {lane_id: count}}
     }
+
+    if orientation_result:
+        result["orientation"] = orientation_result["orientation"]
+        result["orientation_confidence"] = orientation_result["confidence"]
+        result["orientation_model_used"] = "rear" if orientation_result["orientation"] == "rear" else "front"
+
+    return result
