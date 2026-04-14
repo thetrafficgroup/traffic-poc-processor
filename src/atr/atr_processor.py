@@ -219,6 +219,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     previous_positions = {}
     last_known_lane = {}
     recently_counted_bboxes = []  # [(bbox_tuple, frame_count)] for overlap dedup
+    recently_counted_positions = []  # [(lane_id, cx, cy, frame_count)] for position dedup
     tracker = CentroidTracker(max_disappeared=15)
 
     # Debug counters
@@ -619,7 +620,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 crossed = True
 
                         if crossed:
-                            # Safety net: check overlap with recently counted bboxes
+                            # Dedup layer 1: bbox overlap (when bbox available)
                             dominated = False
                             if bbox is not None:
                                 current_poly = shapely_box(bbox[0], bbox[1], bbox[2], bbox[3])
@@ -635,11 +636,31 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                             dominated = True
                                             break
 
+                            # Dedup layer 2: position-based (same lane only, short window)
+                            # This catches bbox=None cases and provides extra safety
+                            if not dominated:
+                                time_window = int(fps * 0.5)  # 0.5 second window
+                                if bbox is not None:
+                                    bbox_height = bbox[3] - bbox[1]
+                                    dist_threshold = max(30, bbox_height * 0.25)
+                                else:
+                                    dist_threshold = 50
+                                for prev_lane, prev_cx, prev_cy, counted_at in recently_counted_positions:
+                                    if frame_count - counted_at > time_window:
+                                        continue
+                                    if prev_lane != lane_id:
+                                        continue
+                                    dist = ((cx - prev_cx)**2 + (cy - prev_cy)**2) ** 0.5
+                                    if dist < dist_threshold:
+                                        dominated = True
+                                        break
+
                             if not dominated:
                                 counted_ids.add(objectID)
                                 lane_counts[lane_id] += 1
                                 if bbox is not None:
                                     recently_counted_bboxes.append((tuple(bbox), frame_count))
+                                recently_counted_positions.append((lane_id, int(cx), int(cy), frame_count))
 
                                 # Count detected class only ONCE per unique object ID
                                 if objectID not in detected_classes:
@@ -656,8 +677,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 del previous_positions[objectID]
                                 last_known_lane.pop(objectID, None)
 
-                # Prune old entries from recently_counted_bboxes
+                # Prune dedup lists
                 recently_counted_bboxes = [(b, f) for b, f in recently_counted_bboxes if frame_count - f <= fps]
+                recently_counted_positions = [(l, x, y, f) for l, x, y, f in recently_counted_positions if frame_count - f <= int(fps * 0.5)]
 
                 # Add visualizations if generating output video
                 if generate_video_output and video_writer:
@@ -841,7 +863,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             crossed = True
 
                     if crossed:
-                        # Safety net: check overlap with recently counted bboxes
+                        # Dedup layer 1: bbox overlap (when bbox available)
                         dominated = False
                         if bbox is not None:
                             current_poly = shapely_box(bbox[0], bbox[1], bbox[2], bbox[3])
@@ -857,11 +879,31 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                         dominated = True
                                         break
 
+                        # Dedup layer 2: position-based (same lane only, short window)
+                        # This catches bbox=None cases and provides extra safety
+                        if not dominated:
+                            time_window = int(fps * 0.5)  # 0.5 second window
+                            if bbox is not None:
+                                bbox_height = bbox[3] - bbox[1]
+                                dist_threshold = max(30, bbox_height * 0.25)
+                            else:
+                                dist_threshold = 50
+                            for prev_lane, prev_cx, prev_cy, counted_at in recently_counted_positions:
+                                if frame_count - counted_at > time_window:
+                                    continue
+                                if prev_lane != lane_id:
+                                    continue
+                                dist = ((cx - prev_cx)**2 + (cy - prev_cy)**2) ** 0.5
+                                if dist < dist_threshold:
+                                    dominated = True
+                                    break
+
                         if not dominated:
                             counted_ids.add(objectID)
                             lane_counts[lane_id] += 1
                             if bbox is not None:
                                 recently_counted_bboxes.append((tuple(bbox), frame_count))
+                            recently_counted_positions.append((lane_id, int(cx), int(cy), frame_count))
 
                             # Count detected class only ONCE per unique object ID
                             if objectID not in detected_classes:
@@ -878,8 +920,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             del previous_positions[objectID]
                             last_known_lane.pop(objectID, None)
 
-            # Prune old entries from recently_counted_bboxes
+            # Prune dedup lists
             recently_counted_bboxes = [(b, f) for b, f in recently_counted_bboxes if frame_count - f <= fps]
+            recently_counted_positions = [(l, x, y, f) for l, x, y, f in recently_counted_positions if frame_count - f <= int(fps * 0.5)]
 
             # Add visualizations if generating output video
             if generate_video_output and video_writer:
