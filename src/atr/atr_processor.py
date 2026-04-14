@@ -218,8 +218,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     counted_ids = set()
     previous_positions = {}
     last_known_lane = {}
+    recently_counted_bboxes = []  # [(bbox_tuple, frame_count)] for overlap dedup
     tracker = CentroidTracker(max_disappeared=15)
-    
+
     # Debug counters
     debug_total_detections = 0
     debug_tracked_objects = set()
@@ -523,7 +524,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     break
 
                 # YOLO detection
-                results = model.predict(frame, conf=CONF_THRESHOLD, verbose=False)
+                results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=True, verbose=False)
                 boxes = results[0].boxes
 
                 input_centroids = []
@@ -601,8 +602,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     if objectID not in counted_ids and lane_id is not None and finish_line is not None:
                         crossed = False
 
-                        # Primary: bbox intersects finish line
-                        if bbox is not None and finish_linestring is not None:
+                        # Primary: bbox intersects finish line (require min 2 frames tracked)
+                        if bbox is not None and finish_linestring is not None and len(previous_positions[objectID]) >= 2:
                             bbox_poly = shapely_box(bbox[0], bbox[1], bbox[2], bbox[3])
                             if bbox_poly.intersects(finish_linestring):
                                 crossed = True
@@ -618,23 +619,45 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 crossed = True
 
                         if crossed:
-                            counted_ids.add(objectID)
-                            lane_counts[lane_id] += 1
+                            # Safety net: check overlap with recently counted bboxes
+                            dominated = False
+                            if bbox is not None:
+                                current_poly = shapely_box(bbox[0], bbox[1], bbox[2], bbox[3])
+                                current_area = current_poly.area
+                                for counted_bbox, counted_at in recently_counted_bboxes:
+                                    if frame_count - counted_at > fps:
+                                        continue
+                                    counted_poly = shapely_box(*counted_bbox)
+                                    if current_poly.intersects(counted_poly):
+                                        overlap = current_poly.intersection(counted_poly).area
+                                        min_area = min(current_area, counted_poly.area)
+                                        if min_area > 0 and overlap / min_area > 0.5:
+                                            dominated = True
+                                            break
 
-                            # Count detected class only ONCE per unique object ID
-                            if objectID not in detected_classes:
-                                detected_classes[objectID] = class_name
+                            if not dominated:
+                                counted_ids.add(objectID)
+                                lane_counts[lane_id] += 1
+                                if bbox is not None:
+                                    recently_counted_bboxes.append((tuple(bbox), frame_count))
 
-                            # Use raw detection label (snake_case) directly
-                            vehicle_counts_by_lane[class_name][lane_id] += 1
+                                # Count detected class only ONCE per unique object ID
+                                if objectID not in detected_classes:
+                                    detected_classes[objectID] = class_name
 
-                            # Track in minute tracker if enabled (pass raw class name)
-                            if minute_tracker:
-                                minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
+                                # Use raw detection label (snake_case) directly
+                                vehicle_counts_by_lane[class_name][lane_id] += 1
 
-                            # Clean up per-track state for counted vehicle to free memory
-                            del previous_positions[objectID]
-                            last_known_lane.pop(objectID, None)
+                                # Track in minute tracker if enabled (pass raw class name)
+                                if minute_tracker:
+                                    minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
+
+                                # Clean up per-track state for counted vehicle to free memory
+                                del previous_positions[objectID]
+                                last_known_lane.pop(objectID, None)
+
+                # Prune old entries from recently_counted_bboxes
+                recently_counted_bboxes = [(b, f) for b, f in recently_counted_bboxes if frame_count - f <= fps]
 
                 # Add visualizations if generating output video
                 if generate_video_output and video_writer:
@@ -723,7 +746,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 break
 
             # YOLO detection
-            results = model.predict(frame, conf=CONF_THRESHOLD, verbose=False)
+            results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=True, verbose=False)
             boxes = results[0].boxes
 
             input_centroids = []
@@ -801,8 +824,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 if objectID not in counted_ids and lane_id is not None and finish_line is not None:
                     crossed = False
 
-                    # Primary: bbox intersects finish line
-                    if bbox is not None and finish_linestring is not None:
+                    # Primary: bbox intersects finish line (require min 2 frames tracked)
+                    if bbox is not None and finish_linestring is not None and len(previous_positions[objectID]) >= 2:
                         bbox_poly = shapely_box(bbox[0], bbox[1], bbox[2], bbox[3])
                         if bbox_poly.intersects(finish_linestring):
                             crossed = True
@@ -818,23 +841,45 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             crossed = True
 
                     if crossed:
-                        counted_ids.add(objectID)
-                        lane_counts[lane_id] += 1
+                        # Safety net: check overlap with recently counted bboxes
+                        dominated = False
+                        if bbox is not None:
+                            current_poly = shapely_box(bbox[0], bbox[1], bbox[2], bbox[3])
+                            current_area = current_poly.area
+                            for counted_bbox, counted_at in recently_counted_bboxes:
+                                if frame_count - counted_at > fps:
+                                    continue
+                                counted_poly = shapely_box(*counted_bbox)
+                                if current_poly.intersects(counted_poly):
+                                    overlap = current_poly.intersection(counted_poly).area
+                                    min_area = min(current_area, counted_poly.area)
+                                    if min_area > 0 and overlap / min_area > 0.5:
+                                        dominated = True
+                                        break
 
-                        # Count detected class only ONCE per unique object ID
-                        if objectID not in detected_classes:
-                            detected_classes[objectID] = class_name
+                        if not dominated:
+                            counted_ids.add(objectID)
+                            lane_counts[lane_id] += 1
+                            if bbox is not None:
+                                recently_counted_bboxes.append((tuple(bbox), frame_count))
 
-                        # Use raw detection label (snake_case) directly
-                        vehicle_counts_by_lane[class_name][lane_id] += 1
+                            # Count detected class only ONCE per unique object ID
+                            if objectID not in detected_classes:
+                                detected_classes[objectID] = class_name
 
-                        # Track in minute tracker if enabled (pass raw class name)
-                        if minute_tracker:
-                            minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
+                            # Use raw detection label (snake_case) directly
+                            vehicle_counts_by_lane[class_name][lane_id] += 1
 
-                        # Clean up per-track state for counted vehicle to free memory
-                        del previous_positions[objectID]
-                        last_known_lane.pop(objectID, None)
+                            # Track in minute tracker if enabled (pass raw class name)
+                            if minute_tracker:
+                                minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
+
+                            # Clean up per-track state for counted vehicle to free memory
+                            del previous_positions[objectID]
+                            last_known_lane.pop(objectID, None)
+
+            # Prune old entries from recently_counted_bboxes
+            recently_counted_bboxes = [(b, f) for b, f in recently_counted_bboxes if frame_count - f <= fps]
 
             # Add visualizations if generating output video
             if generate_video_output and video_writer:
