@@ -158,7 +158,7 @@ def point_side_of_line(p, a, b):
     # Ensure all coordinates are numeric (handle potential float/int mix)
     return (float(b[0]) - float(a[0])) * (float(p[1]) - float(a[1])) - (float(b[1]) - float(a[1])) * (float(p[0]) - float(a[0]))
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None, video_uuid=None, minute_batch_callback=None, trim_periods=None, truck_classifier_model_path=None, rear_model_path=None):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None, video_uuid=None, minute_batch_callback=None, trim_periods=None, truck_classifier_model_path=None, rear_model_path=None, axle_detector_model_path=None):
     """
     Process video for ATR (Automatic Traffic Recording) analysis with optional trimming.
 
@@ -172,6 +172,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         video_uuid: UUID of the video being processed (optional, for minute tracking)
         minute_batch_callback: Optional callback for minute-by-minute batch data
         trim_periods: Optional list of trim periods in seconds [{"start": 3600, "end": 10800}, ...]
+        axle_detector_model_path: Optional path to wheel/axle detector model for FHWA classification
 
     Returns:
         Dictionary with lane counts and total count
@@ -198,6 +199,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     if truck_classifier_model_path:
         from utils.truck_classifier import TruckClassifier
         truck_classifier = TruckClassifier(truck_classifier_model_path)
+
+    # Load optional axle detector for FHWA classification
+    axle_classifier = None
+    if axle_detector_model_path:
+        from utils.axle_count_classifier import AxleCountClassifier
+        axle_classifier = AxleCountClassifier(axle_detector_model_path)
 
     # Process lanes configuration
     lanes = LINES_DATA["lanes"]
@@ -227,6 +234,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     debug_tracked_objects = set()
     detected_classes = {}
     class_counts_by_id = {}
+    max_axle_count_by_id = {}  # Track maximum axle count per vehicle for FHWA classification
 
     # Track raw detection labels by lane (use defaultdict pattern)
     from collections import defaultdict
@@ -578,6 +586,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         if len(matched_detection) > 6:
                             wheels_x, wheels_y = matched_detection[5], matched_detection[6]
 
+                    # Detect axles for trucks (accumulate max across frames)
+                    # Sample every 5 frames to reduce computation while maintaining accuracy
+                    if axle_classifier and bbox is not None and frame_count % 5 == 0 and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                        axle_count = axle_classifier.detect_axles(frame, bbox)
+                        if axle_count is not None:
+                            current_max = max_axle_count_by_id.get(objectID, 0)
+                            max_axle_count_by_id[objectID] = max(current_max, axle_count)
+
                     # Find lane (wheels → centroid → bottom-band fallback)
                     lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)
 
@@ -662,20 +678,29 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                     recently_counted_bboxes.append((tuple(bbox), frame_count))
                                 recently_counted_positions.append((lane_id, int(cx), int(cy), frame_count))
 
+                                # Determine final class name with FHWA-specific label for trucks
+                                final_class_name = class_name
+                                if axle_classifier and objectID in max_axle_count_by_id:
+                                    axle_count = max_axle_count_by_id[objectID]
+                                    fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
+                                    if fhwa_class is not None and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                                        final_class_name = f"{class_name}_fhwa{fhwa_class}"
+
                                 # Count detected class only ONCE per unique object ID
                                 if objectID not in detected_classes:
-                                    detected_classes[objectID] = class_name
+                                    detected_classes[objectID] = final_class_name
 
-                                # Use raw detection label (snake_case) directly
-                                vehicle_counts_by_lane[class_name][lane_id] += 1
+                                # Use detection label (with FHWA suffix when available)
+                                vehicle_counts_by_lane[final_class_name][lane_id] += 1
 
-                                # Track in minute tracker if enabled (pass raw class name)
+                                # Track in minute tracker if enabled
                                 if minute_tracker:
-                                    minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
+                                    minute_tracker.process_vehicle_detection(frame_count, objectID, final_class_name, lane_id)
 
                                 # Clean up per-track state for counted vehicle to free memory
                                 del previous_positions[objectID]
                                 last_known_lane.pop(objectID, None)
+                                max_axle_count_by_id.pop(objectID, None)  # Clean up axle data too
 
                 # Prune dedup lists
                 recently_counted_bboxes = [(b, f) for b, f in recently_counted_bboxes if frame_count - f <= fps]
@@ -821,6 +846,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     if len(matched_detection) > 6:
                         wheels_x, wheels_y = matched_detection[5], matched_detection[6]
 
+                # Detect axles for trucks (accumulate max across frames) - normal mode
+                # Sample every 5 frames to reduce computation while maintaining accuracy
+                if axle_classifier and bbox is not None and frame_count % 5 == 0 and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                    axle_count = axle_classifier.detect_axles(frame, bbox)
+                    if axle_count is not None:
+                        current_max = max_axle_count_by_id.get(objectID, 0)
+                        max_axle_count_by_id[objectID] = max(current_max, axle_count)
+
                 # Find lane (wheels → centroid → bottom-band fallback)
                 lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)
 
@@ -905,20 +938,29 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 recently_counted_bboxes.append((tuple(bbox), frame_count))
                             recently_counted_positions.append((lane_id, int(cx), int(cy), frame_count))
 
+                            # Determine final class name with FHWA-specific label for trucks - normal mode
+                            final_class_name = class_name
+                            if axle_classifier and objectID in max_axle_count_by_id:
+                                axle_count = max_axle_count_by_id[objectID]
+                                fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
+                                if fhwa_class is not None and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                                    final_class_name = f"{class_name}_fhwa{fhwa_class}"
+
                             # Count detected class only ONCE per unique object ID
                             if objectID not in detected_classes:
-                                detected_classes[objectID] = class_name
+                                detected_classes[objectID] = final_class_name
 
-                            # Use raw detection label (snake_case) directly
-                            vehicle_counts_by_lane[class_name][lane_id] += 1
+                            # Use detection label (with FHWA suffix when available)
+                            vehicle_counts_by_lane[final_class_name][lane_id] += 1
 
-                            # Track in minute tracker if enabled (pass raw class name)
+                            # Track in minute tracker if enabled
                             if minute_tracker:
-                                minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
+                                minute_tracker.process_vehicle_detection(frame_count, objectID, final_class_name, lane_id)
 
                             # Clean up per-track state for counted vehicle to free memory
                             del previous_positions[objectID]
                             last_known_lane.pop(objectID, None)
+                            max_axle_count_by_id.pop(objectID, None)  # Clean up axle data too
 
             # Prune dedup lists
             recently_counted_bboxes = [(b, f) for b, f in recently_counted_bboxes if frame_count - f <= fps]

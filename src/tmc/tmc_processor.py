@@ -261,7 +261,7 @@ def process_single_detection(
     prev_wheels[obj_id] = (wx, wy)
 
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None, progress_callback=None, minute_batch_callback=None, generate_video_output=False, output_video_path=None, trim_periods=None, pedestrian_model_path=None, truck_classifier_model_path=None):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None, progress_callback=None, minute_batch_callback=None, generate_video_output=False, output_video_path=None, trim_periods=None, pedestrian_model_path=None, truck_classifier_model_path=None, axle_detector_model_path=None):
     """
     Process video for TMC (Turning Movement Count) analysis with optional trimming.
 
@@ -276,6 +276,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         output_video_path: Path for output video (if generate_video_output=True)
         trim_periods: Optional list of trim periods in seconds [{"start": 3600, "end": 10800}, ...]
         pedestrian_model_path: Optional path to pedestrian/bicycle YOLO model
+        axle_detector_model_path: Optional path to wheel/axle detector model for FHWA classification
 
     Returns:
         Dictionary with processing results (includes crosswalk data if applicable)
@@ -321,6 +322,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         from utils.truck_classifier import TruckClassifier
         truck_classifier = TruckClassifier(truck_classifier_model_path)
 
+    # Load optional axle detector for FHWA classification
+    axle_classifier = None
+    if axle_detector_model_path:
+        from utils.axle_count_classifier import AxleCountClassifier
+        axle_classifier = AxleCountClassifier(axle_detector_model_path)
+
     # CRITICAL: Strip crosswalks from LINES_DATA before line-parsing loop.
     # The crosswalks key contains an array, not a dict with pt1/pt2.
     # Leaving it would crash with TypeError in the loop below.
@@ -351,7 +358,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     crossing_timestamps = {}
     detected_classes = {}
     class_counts_by_id = {}
-    
+    max_axle_count_by_id = {}  # Track maximum axle count per vehicle for FHWA classification
+
     # Initialize track interpolator for handling occlusions
     track_interpolator = TrackInterpolator(max_missing_frames=15, min_track_length=3)
     overlap_stats = {"total_overlaps": 0, "frames_with_overlaps": 0, "frames_optimized": 0}
@@ -763,6 +771,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         cx, cy = get_centroid(box)
                         wx, wy = get_wheels_position(box)
 
+                        # Detect axles for trucks (accumulate max across frames)
+                        # Sample every 5 frames to reduce computation while maintaining accuracy
+                        if axle_classifier and current_frame % 5 == 0 and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                            axle_count = axle_classifier.detect_axles(frame, box)
+                            if axle_count is not None:
+                                current_max = max_axle_count_by_id.get(obj_id, 0)
+                                max_axle_count_by_id[obj_id] = max(current_max, axle_count)
+
                         process_single_detection(
                             obj_id, class_name, cx, cy, wx, wy, current_frame,
                             prev_wheels, prev_centroids, counted_ids_per_line,
@@ -875,6 +891,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                     # Get vehicle class (use detected_classes for consistency with final results)
                                     vehicle_class = detected_classes.get(vehicle_id, 'unknown')
 
+                                    # Refine truck class with FHWA-specific label if axle data available
+                                    if axle_classifier and vehicle_id in max_axle_count_by_id:
+                                        if vehicle_class in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                                            axle_count = max_axle_count_by_id[vehicle_id]
+                                            fhwa_class = axle_classifier.get_fhwa_class(vehicle_class, axle_count)
+                                            if fhwa_class is not None:
+                                                vehicle_class = f"{vehicle_class}_fhwa{fhwa_class}"
+
                                     # Get origin direction (first line crossed)
                                     origin_direction = crossing_timestamps[vehicle_id][0][0].upper()
 
@@ -889,6 +913,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                         origin_direction,
                                         turn_type
                                     )
+
+                                    # Clean up axle data for this vehicle to free memory
+                                    max_axle_count_by_id.pop(vehicle_id, None)
 
                 # Progress tracking
                 current_frame += 1
@@ -963,6 +990,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         continue
                     cx, cy = get_centroid(box)
                     wx, wy = get_wheels_position(box)
+
+                    # Detect axles for trucks (accumulate max across frames) - normal mode
+                    # Sample every 5 frames to reduce computation while maintaining accuracy
+                    if axle_classifier and current_frame % 5 == 0 and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                        axle_count = axle_classifier.detect_axles(frame, box)
+                        if axle_count is not None:
+                            current_max = max_axle_count_by_id.get(obj_id, 0)
+                            max_axle_count_by_id[obj_id] = max(current_max, axle_count)
 
                     process_single_detection(
                         obj_id, class_name, cx, cy, wx, wy, current_frame,
@@ -1076,6 +1111,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                 # Get vehicle class (use detected_classes for consistency with final results)
                                 vehicle_class = detected_classes.get(vehicle_id, 'unknown')
 
+                                # Refine truck class with FHWA-specific label if axle data available - normal mode
+                                if axle_classifier and vehicle_id in max_axle_count_by_id:
+                                    if vehicle_class in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                                        axle_count = max_axle_count_by_id[vehicle_id]
+                                        fhwa_class = axle_classifier.get_fhwa_class(vehicle_class, axle_count)
+                                        if fhwa_class is not None:
+                                            vehicle_class = f"{vehicle_class}_fhwa{fhwa_class}"
+
                                 # Get origin direction (first line crossed)
                                 origin_direction = crossing_timestamps[vehicle_id][0][0].upper()
 
@@ -1090,6 +1133,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                     origin_direction,
                                     turn_type
                                 )
+
+                                # Clean up axle data for this vehicle to free memory
+                                max_axle_count_by_id.pop(vehicle_id, None)
 
             # Progress tracking
             current_frame += 1
@@ -1135,6 +1181,18 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # Post procesamiento con lógica corregida
     # Usar entry_counted_ids para el conteo total (solo vehículos que entraron desde afuera)
     total_count = len(entry_counted_ids)
+
+    # Refine detected_classes with FHWA-specific labels for trucks when axle data is available
+    if axle_classifier:
+        for obj_id in list(detected_classes.keys()):
+            class_name = detected_classes[obj_id]
+            if class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck") and obj_id in max_axle_count_by_id:
+                axle_count = max_axle_count_by_id[obj_id]
+                fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
+                if fhwa_class is not None:
+                    detected_classes[obj_id] = f"{class_name}_fhwa{fhwa_class}"
+        # Clear remaining axle data to free memory
+        max_axle_count_by_id.clear()
 
     # Convert detected_classes from {obj_id: class_name} to {class_name: count}
     class_summary = Counter(detected_classes.values())
