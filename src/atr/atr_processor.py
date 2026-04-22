@@ -236,6 +236,20 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     class_counts_by_id = {}
     max_axle_count_by_id = {}  # Track maximum axle count per vehicle for FHWA classification
 
+    # Axle detection statistics for debugging and analysis
+    axle_detection_stats = {
+        "trucks_detected": 0,           # Total trucks that crossed finish line
+        "axle_detection_attempted": 0,  # Number of trucks where axle detection was tried
+        "axle_detection_successful": 0, # Number of trucks with successful axle count
+        "axle_counts_distribution": {},  # {axle_count: vehicle_count}
+        "fhwa_class_distribution": {},   # {fhwa_class: count}
+        "detection_by_truck_type": {     # Per truck type stats
+            "single_unit_truck": {"attempted": 0, "successful": 0},
+            "articulated_truck": {"attempted": 0, "successful": 0},
+            "multi_articulated_truck": {"attempted": 0, "successful": 0},
+        }
+    }
+
     # Track raw detection labels by lane (use defaultdict pattern)
     from collections import defaultdict
     vehicle_counts_by_lane = defaultdict(lambda: defaultdict(int))
@@ -684,11 +698,25 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                                 # Determine final class name with FHWA-specific label for trucks
                                 final_class_name = class_name
-                                if axle_classifier and objectID in max_axle_count_by_id:
-                                    axle_count = max_axle_count_by_id[objectID]
-                                    fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
-                                    if fhwa_class is not None and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
-                                        final_class_name = f"{class_name}_fhwa{fhwa_class}"
+
+                                # Track axle detection stats for trucks
+                                if class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                                    axle_detection_stats["trucks_detected"] += 1
+                                    axle_detection_stats["detection_by_truck_type"][class_name]["attempted"] += 1
+                                    axle_detection_stats["axle_detection_attempted"] += 1
+
+                                    if axle_classifier and objectID in max_axle_count_by_id:
+                                        axle_count = max_axle_count_by_id[objectID]
+                                        axle_detection_stats["axle_detection_successful"] += 1
+                                        axle_detection_stats["detection_by_truck_type"][class_name]["successful"] += 1
+                                        axle_detection_stats["axle_counts_distribution"][axle_count] = \
+                                            axle_detection_stats["axle_counts_distribution"].get(axle_count, 0) + 1
+
+                                        fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
+                                        if fhwa_class is not None:
+                                            final_class_name = f"{class_name}_fhwa{fhwa_class}"
+                                            axle_detection_stats["fhwa_class_distribution"][fhwa_class] = \
+                                                axle_detection_stats["fhwa_class_distribution"].get(fhwa_class, 0) + 1
 
                                 # Count detected class only ONCE per unique object ID
                                 if objectID not in detected_classes:
@@ -948,11 +976,25 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                             # Determine final class name with FHWA-specific label for trucks - normal mode
                             final_class_name = class_name
-                            if axle_classifier and objectID in max_axle_count_by_id:
-                                axle_count = max_axle_count_by_id[objectID]
-                                fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
-                                if fhwa_class is not None and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
-                                    final_class_name = f"{class_name}_fhwa{fhwa_class}"
+
+                            # Track axle detection stats for trucks - normal mode
+                            if class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                                axle_detection_stats["trucks_detected"] += 1
+                                axle_detection_stats["detection_by_truck_type"][class_name]["attempted"] += 1
+                                axle_detection_stats["axle_detection_attempted"] += 1
+
+                                if axle_classifier and objectID in max_axle_count_by_id:
+                                    axle_count = max_axle_count_by_id[objectID]
+                                    axle_detection_stats["axle_detection_successful"] += 1
+                                    axle_detection_stats["detection_by_truck_type"][class_name]["successful"] += 1
+                                    axle_detection_stats["axle_counts_distribution"][axle_count] = \
+                                        axle_detection_stats["axle_counts_distribution"].get(axle_count, 0) + 1
+
+                                    fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
+                                    if fhwa_class is not None:
+                                        final_class_name = f"{class_name}_fhwa{fhwa_class}"
+                                        axle_detection_stats["fhwa_class_distribution"][fhwa_class] = \
+                                            axle_detection_stats["fhwa_class_distribution"].get(fhwa_class, 0) + 1
 
                             # Count detected class only ONCE per unique object ID
                             if objectID not in detected_classes:
@@ -1091,12 +1133,22 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     for class_name, lane_data in vehicle_counts_by_lane.items():
         detected_classes_summary[class_name] = sum(lane_data.values())
 
+    # Calculate axle detection success rate
+    if axle_detection_stats["axle_detection_attempted"] > 0:
+        axle_detection_stats["success_rate"] = round(
+            axle_detection_stats["axle_detection_successful"] /
+            axle_detection_stats["axle_detection_attempted"] * 100, 1
+        )
+    else:
+        axle_detection_stats["success_rate"] = None
+
     result = {
         "lane_counts": lane_counts,
         "total_count": total_count,
         "study_type": "ATR",
         "detected_classes": detected_classes_summary,  # Raw detection labels with counts
-        "vehicles": vehicles_by_class  # Raw detection labels by lane: {class_name: {lane_id: count}}
+        "vehicles": vehicles_by_class,  # Raw detection labels by lane: {class_name: {lane_id: count}}
+        "axle_detection_stats": axle_detection_stats if axle_classifier else None
     }
 
     if orientation_result:
