@@ -31,7 +31,19 @@ def normalize_response(processor_type: str, raw_result: Dict[str, Any]) -> Dict[
     # IMPORTANT: Preserve the videoOutput field if it exists
     if "videoOutput" in raw_result:
         normalized["videoOutput"] = raw_result["videoOutput"]
-    
+
+    # Preserve axle detection stats for debugging and analysis
+    if "axle_detection_stats" in raw_result:
+        normalized["axle_detection_stats"] = raw_result["axle_detection_stats"]
+
+    # Preserve overlap analysis stats
+    if "overlap_analysis" in raw_result:
+        normalized["overlap_analysis"] = raw_result["overlap_analysis"]
+
+    # Preserve video metadata
+    if "video_metadata" in raw_result:
+        normalized["video_metadata"] = raw_result["video_metadata"]
+
     return normalized
 
 
