@@ -593,6 +593,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         if axle_count is not None:
                             current_max = max_axle_count_by_id.get(objectID, 0)
                             max_axle_count_by_id[objectID] = max(current_max, axle_count)
+                            # Update visualization label with current FHWA estimate
+                            fhwa_class = axle_classifier.get_fhwa_class(class_name, max_axle_count_by_id[objectID])
+                            if fhwa_class is not None:
+                                class_counts_by_id[objectID] = f"{class_name}_fhwa{fhwa_class}"
 
                     # Find lane (wheels → centroid → bottom-band fallback)
                     lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)
@@ -853,6 +857,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     if axle_count is not None:
                         current_max = max_axle_count_by_id.get(objectID, 0)
                         max_axle_count_by_id[objectID] = max(current_max, axle_count)
+                        # Update visualization label with current FHWA estimate
+                        fhwa_class = axle_classifier.get_fhwa_class(class_name, max_axle_count_by_id[objectID])
+                        if fhwa_class is not None:
+                            class_counts_by_id[objectID] = f"{class_name}_fhwa{fhwa_class}"
 
                 # Find lane (wheels → centroid → bottom-band fallback)
                 lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)

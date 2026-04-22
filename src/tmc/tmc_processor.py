@@ -778,6 +778,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                             if axle_count is not None:
                                 current_max = max_axle_count_by_id.get(obj_id, 0)
                                 max_axle_count_by_id[obj_id] = max(current_max, axle_count)
+                                # Update visualization label with current FHWA estimate
+                                fhwa_class = axle_classifier.get_fhwa_class(class_name, max_axle_count_by_id[obj_id])
+                                if fhwa_class is not None:
+                                    class_counts_by_id[obj_id] = f"{class_name}_fhwa{fhwa_class}"
 
                         process_single_detection(
                             obj_id, class_name, cx, cy, wx, wy, current_frame,
@@ -998,6 +1002,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         if axle_count is not None:
                             current_max = max_axle_count_by_id.get(obj_id, 0)
                             max_axle_count_by_id[obj_id] = max(current_max, axle_count)
+                            # Update visualization label with current FHWA estimate
+                            fhwa_class = axle_classifier.get_fhwa_class(class_name, max_axle_count_by_id[obj_id])
+                            if fhwa_class is not None:
+                                class_counts_by_id[obj_id] = f"{class_name}_fhwa{fhwa_class}"
 
                     process_single_detection(
                         obj_id, class_name, cx, cy, wx, wy, current_frame,
