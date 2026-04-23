@@ -787,15 +787,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
                         # Detect axles for trucks (accumulate max across frames)
                         # Sample every 5 frames to reduce computation while maintaining accuracy
+                        # Note: We do NOT store FHWA suffix in class_counts_by_id here to avoid breaking
+                        # subsequent axle detection checks. FHWA is computed on-demand for visualization/output.
                         if axle_classifier and current_frame % 5 == 0 and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
                             axle_count = axle_classifier.detect_axles(frame, box)
                             if axle_count is not None:
                                 current_max = max_axle_count_by_id.get(obj_id, 0)
                                 max_axle_count_by_id[obj_id] = max(current_max, axle_count)
-                                # Update visualization label with current FHWA estimate
-                                fhwa_class = axle_classifier.get_fhwa_class(class_name, max_axle_count_by_id[obj_id])
-                                if fhwa_class is not None:
-                                    class_counts_by_id[obj_id] = f"{class_name}_fhwa{fhwa_class}"
 
                         process_single_detection(
                             obj_id, class_name, cx, cy, wx, wy, current_frame,
@@ -843,6 +841,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                             cls_name = class_counts_by_id.get(obj_id, raw_cls)
                             if cls_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                                 continue
+                            # Compute FHWA suffix on-demand for visualization
+                            if axle_classifier and obj_id in max_axle_count_by_id:
+                                fhwa_viz = axle_classifier.get_fhwa_class(cls_name, max_axle_count_by_id[obj_id])
+                                if fhwa_viz is not None:
+                                    cls_name = f"{cls_name}_fhwa{fhwa_viz}"
                             x1, y1, x2, y2 = box
                             cx, cy = get_centroid(box)
 
@@ -1011,15 +1014,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
                     # Detect axles for trucks (accumulate max across frames) - normal mode
                     # Sample every 5 frames to reduce computation while maintaining accuracy
+                    # Note: We do NOT store FHWA suffix in class_counts_by_id here to avoid breaking
+                    # subsequent axle detection checks. FHWA is computed on-demand for visualization/output.
                     if axle_classifier and current_frame % 5 == 0 and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
                         axle_count = axle_classifier.detect_axles(frame, box)
                         if axle_count is not None:
                             current_max = max_axle_count_by_id.get(obj_id, 0)
                             max_axle_count_by_id[obj_id] = max(current_max, axle_count)
-                            # Update visualization label with current FHWA estimate
-                            fhwa_class = axle_classifier.get_fhwa_class(class_name, max_axle_count_by_id[obj_id])
-                            if fhwa_class is not None:
-                                class_counts_by_id[obj_id] = f"{class_name}_fhwa{fhwa_class}"
 
                     process_single_detection(
                         obj_id, class_name, cx, cy, wx, wy, current_frame,
@@ -1067,6 +1068,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         cls_name = class_counts_by_id.get(obj_id, raw_cls)
                         if cls_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                             continue
+                        # Compute FHWA suffix on-demand for visualization
+                        if axle_classifier and obj_id in max_axle_count_by_id:
+                            fhwa_viz = axle_classifier.get_fhwa_class(cls_name, max_axle_count_by_id[obj_id])
+                            if fhwa_viz is not None:
+                                cls_name = f"{cls_name}_fhwa{fhwa_viz}"
                         x1, y1, x2, y2 = box
                         cx, cy = get_centroid(box)
 

@@ -602,15 +602,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                     # Detect axles for trucks (accumulate max across frames)
                     # Sample every 5 frames to reduce computation while maintaining accuracy
+                    # Note: We do NOT store FHWA suffix in class_counts_by_id here to avoid breaking
+                    # subsequent axle detection checks. FHWA is computed on-demand for visualization/output.
                     if axle_classifier and bbox is not None and frame_count % 5 == 0 and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
                         axle_count = axle_classifier.detect_axles(frame, bbox)
                         if axle_count is not None:
                             current_max = max_axle_count_by_id.get(objectID, 0)
                             max_axle_count_by_id[objectID] = max(current_max, axle_count)
-                            # Update visualization label with current FHWA estimate
-                            fhwa_class = axle_classifier.get_fhwa_class(class_name, max_axle_count_by_id[objectID])
-                            if fhwa_class is not None:
-                                class_counts_by_id[objectID] = f"{class_name}_fhwa{fhwa_class}"
 
                     # Find lane (wheels → centroid → bottom-band fallback)
                     lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)
@@ -760,6 +758,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             detection_data = detections_map[(cx, cy)]
                             x1, y1, x2, y2 = detection_data[:4]
                             class_name_viz = class_counts_by_id.get(objectID, detection_data[4] if len(detection_data) > 4 else None)
+                            # Compute FHWA suffix on-demand for visualization
+                            if axle_classifier and class_name_viz and objectID in max_axle_count_by_id:
+                                fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, max_axle_count_by_id[objectID])
+                                if fhwa_viz is not None:
+                                    class_name_viz = f"{class_name_viz}_fhwa{fhwa_viz}"
                             cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
                             # Draw wheels position if available (for debugging)
@@ -880,15 +883,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                 # Detect axles for trucks (accumulate max across frames) - normal mode
                 # Sample every 5 frames to reduce computation while maintaining accuracy
+                # Note: We do NOT store FHWA suffix in class_counts_by_id here to avoid breaking
+                # subsequent axle detection checks. FHWA is computed on-demand for visualization/output.
                 if axle_classifier and bbox is not None and frame_count % 5 == 0 and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
                     axle_count = axle_classifier.detect_axles(frame, bbox)
                     if axle_count is not None:
                         current_max = max_axle_count_by_id.get(objectID, 0)
                         max_axle_count_by_id[objectID] = max(current_max, axle_count)
-                        # Update visualization label with current FHWA estimate
-                        fhwa_class = axle_classifier.get_fhwa_class(class_name, max_axle_count_by_id[objectID])
-                        if fhwa_class is not None:
-                            class_counts_by_id[objectID] = f"{class_name}_fhwa{fhwa_class}"
 
                 # Find lane (wheels → centroid → bottom-band fallback)
                 lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)
@@ -1038,6 +1039,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         detection_data = detections_map[(cx, cy)]
                         x1, y1, x2, y2 = detection_data[:4]
                         class_name_viz = class_counts_by_id.get(objectID, detection_data[4] if len(detection_data) > 4 else None)
+                        # Compute FHWA suffix on-demand for visualization
+                        if axle_classifier and class_name_viz and objectID in max_axle_count_by_id:
+                            fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, max_axle_count_by_id[objectID])
+                            if fhwa_viz is not None:
+                                class_name_viz = f"{class_name_viz}_fhwa{fhwa_viz}"
                         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
                         # Draw wheels position if available (for debugging)
