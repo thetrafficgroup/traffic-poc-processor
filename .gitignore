@@ -3,3 +3,5 @@ video.mp4
 lines.json
 venv
 .sa
+__pycache__/
+*.pyc

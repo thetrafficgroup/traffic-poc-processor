@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import json
 import time
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Point, Polygon, LineString, box as shapely_box
 from ultralytics import YOLO
 from collections import OrderedDict, Counter
 from .atr_minute_tracker import ATRMinuteTracker
@@ -16,11 +16,12 @@ from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim
 
 # === Centroid Tracker ===
 class CentroidTracker:
-    def __init__(self, max_disappeared=15):
+    def __init__(self, max_disappeared=15, max_distance=150):
         self.nextObjectID = 0
         self.objects = OrderedDict()
         self.disappeared = OrderedDict()
         self.max_disappeared = max_disappeared
+        self.max_distance = max_distance
 
     def register(self, centroid):
         self.objects[self.nextObjectID] = centroid
@@ -55,6 +56,8 @@ class CentroidTracker:
             for (row, col) in zip(rows, cols):
                 if row in used_rows or col in used_cols:
                     continue
+                if D[row, col] > self.max_distance:
+                    continue
                 objectID = objectIDs[row]
                 self.objects[objectID] = input_centroids[col]
                 self.disappeared[objectID] = 0
@@ -85,26 +88,51 @@ def get_wheels_position(box):
     # Wheels are at the bottom center of the vehicle
     return int((x1 + x2) / 2), int(y2)
 
-def find_vehicle_lane(centroid_x, centroid_y, wheels_x, wheels_y, lane_polygons_buffered):
+def find_vehicle_lane(cx, cy, wx, wy, lane_polygons_buffered, bbox=None):
     """
     Find vehicle lane using wheels-priority approach.
-    First checks wheel position, falls back to centroid if no match.
-    
-    Returns:
-        lane_id or None
+    Falls back to centroid, then bottom-band intersection for large bboxes.
     """
-    # Priority 1: Check wheels position
-    wheels_point = Point(wheels_x, wheels_y)
-    for lane_id, buffered_polygon in lane_polygons_buffered:
-        if buffered_polygon.contains(wheels_point):
+    # Priority 1: wheels position
+    if wx is not None and wy is not None:
+        wheels_point = Point(wx, wy)
+        for lane_id, poly in lane_polygons_buffered:
+            if poly.covers(wheels_point):
+                return lane_id
+
+    # Priority 2: centroid
+    centroid_point = Point(cx, cy)
+    for lane_id, poly in lane_polygons_buffered:
+        if poly.covers(centroid_point):
             return lane_id
-    
-    # Priority 2: Fallback to centroid
-    centroid_point = Point(centroid_x, centroid_y)
-    for lane_id, buffered_polygon in lane_polygons_buffered:
-        if buffered_polygon.contains(centroid_point):
-            return lane_id
-    
+
+    if bbox is not None:
+        x1, y1, x2, y2 = bbox
+
+        # Priority 3: bottom-band intersection (bottom 25% of bbox)
+        band_top = y2 - (y2 - y1) * 0.25
+        bottom_band = shapely_box(x1, band_top, x2, y2)
+        best_lane, best_area = None, 0
+        for lane_id, poly in lane_polygons_buffered:
+            if poly.intersects(bottom_band):
+                area = poly.intersection(bottom_band).area
+                if area > best_area:
+                    best_area = area
+                    best_lane = lane_id
+        if best_lane is not None:
+            return best_lane
+
+        # Priority 4: full bbox intersection (largest overlap wins)
+        full_bbox = shapely_box(x1, y1, x2, y2)
+        best_lane, best_area = None, 0
+        for lane_id, poly in lane_polygons_buffered:
+            if poly.intersects(full_bbox):
+                area = poly.intersection(full_bbox).area
+                if area > best_area:
+                    best_area = area
+                    best_lane = lane_id
+        return best_lane
+
     return None
 
 def dict_points_to_tuples(points):
@@ -130,7 +158,7 @@ def point_side_of_line(p, a, b):
     # Ensure all coordinates are numeric (handle potential float/int mix)
     return (float(b[0]) - float(a[0])) * (float(p[1]) - float(a[1])) - (float(b[1]) - float(a[1])) * (float(p[0]) - float(a[0]))
 
-def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None, video_uuid=None, minute_batch_callback=None, trim_periods=None, truck_classifier_model_path=None):
+def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callback=None, generate_video_output=False, output_video_path=None, video_uuid=None, minute_batch_callback=None, trim_periods=None, truck_classifier_model_path=None, rear_model_path=None, axle_detector_model_path=None):
     """
     Process video for ATR (Automatic Traffic Recording) analysis with optional trimming.
 
@@ -144,6 +172,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         video_uuid: UUID of the video being processed (optional, for minute tracking)
         minute_batch_callback: Optional callback for minute-by-minute batch data
         trim_periods: Optional list of trim periods in seconds [{"start": 3600, "end": 10800}, ...]
+        axle_detector_model_path: Optional path to wheel/axle detector model for FHWA classification
 
     Returns:
         Dictionary with lane counts and total count
@@ -165,15 +194,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
 
-    # Load YOLO model
-    model = YOLO(MODEL_PATH)
-    print(f"✅ YOLO model loaded: {MODEL_PATH}")
-
     # Load optional truck subtype classifier
     truck_classifier = None
     if truck_classifier_model_path:
         from utils.truck_classifier import TruckClassifier
         truck_classifier = TruckClassifier(truck_classifier_model_path)
+
+    # Load optional axle detector for FHWA classification
+    axle_classifier = None
+    if axle_detector_model_path:
+        from utils.axle_count_classifier import AxleCountClassifier
+        axle_classifier = AxleCountClassifier(axle_detector_model_path)
 
     # Process lanes configuration
     lanes = LINES_DATA["lanes"]
@@ -188,17 +219,36 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     finish_line = LINES_DATA.get("finish_line")
     if finish_line and isinstance(finish_line[0], dict):
         finish_line = dict_points_to_tuples(finish_line)
-    
+    finish_linestring = LineString(finish_line) if finish_line and len(finish_line) == 2 else None
+
     # Initialize tracking variables
     counted_ids = set()
     previous_positions = {}
+    last_known_lane = {}
+    recently_counted_bboxes = []  # [(bbox_tuple, frame_count)] for overlap dedup
+    recently_counted_positions = []  # [(lane_id, cx, cy, frame_count)] for position dedup
     tracker = CentroidTracker(max_disappeared=15)
-    
+
     # Debug counters
     debug_total_detections = 0
     debug_tracked_objects = set()
     detected_classes = {}
     class_counts_by_id = {}
+    max_axle_count_by_id = {}  # Track maximum axle count per vehicle for FHWA classification
+
+    # Axle detection statistics for debugging and analysis
+    axle_detection_stats = {
+        "trucks_detected": 0,           # Total trucks that crossed finish line
+        "axle_detection_attempted": 0,  # Number of trucks where axle detection was tried
+        "axle_detection_successful": 0, # Number of trucks with successful axle count
+        "axle_counts_distribution": {},  # {axle_count: vehicle_count}
+        "fhwa_class_distribution": {},   # {fhwa_class: count}
+        "detection_by_truck_type": {     # Per truck type stats
+            "single_unit_truck": {"attempted": 0, "successful": 0},
+            "articulated_truck": {"attempted": 0, "successful": 0},
+            "multi_articulated_truck": {"attempted": 0, "successful": 0},
+        }
+    }
 
     # Track raw detection labels by lane (use defaultdict pattern)
     from collections import defaultdict
@@ -228,6 +278,43 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Calculate total_processing_frames for normal mode too (for unified progress calculation)
     if not frame_ranges:
         total_processing_frames = total_frames
+
+    # Auto-detect vehicle orientation if rear model is available
+    orientation_result = None
+    if rear_model_path:
+        from .orientation_detector import detect_vehicle_orientation
+
+        cal_start_frame = 0
+        if frame_ranges:
+            cal_start_frame = frame_ranges[0]["start_frame"]
+
+        print("🔍 Running vehicle orientation calibration...")
+        orientation_result = detect_vehicle_orientation(
+            VIDEO_PATH, MODEL_PATH, fps,
+            calibration_seconds=30, min_vehicles=3,
+            start_frame=cal_start_frame
+        )
+
+        print(f"🔍 Orientation result: {orientation_result['orientation']} "
+              f"(confidence={orientation_result['confidence']:.2f}, "
+              f"vehicles={orientation_result['vehicles_analyzed']})")
+
+        # Load the appropriate model based on calibration result
+        if orientation_result["orientation"] == "rear":
+            model = YOLO(rear_model_path)
+            print(f"✅ Rear YOLO model loaded: {rear_model_path}")
+        else:
+            model = YOLO(MODEL_PATH)
+            print(f"✅ Front YOLO model loaded: {MODEL_PATH}")
+
+        # Re-open video capture to reset frame position after calibration consumed frames
+        cap.release()
+        cap = cv2.VideoCapture(VIDEO_PATH)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        fps = cap.get(cv2.CAP_PROP_FPS)
+    else:
+        model = YOLO(MODEL_PATH)
+        print(f"✅ YOLO model loaded: {MODEL_PATH}")
 
     # Initialize minute tracker if callback provided
     minute_tracker = None
@@ -332,8 +419,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     def reset_centroid_tracker():
         """Reset CentroidTracker to start fresh tracking for new period"""
         nonlocal tracker
+        next_id = tracker.nextObjectID
         tracker = CentroidTracker(max_disappeared=15)
-        print("🔄 ATR CentroidTracker reset - previous tracking state cleared")
+        tracker.nextObjectID = next_id
+        print(f"🔄 ATR CentroidTracker reset (nextObjectID={next_id}) - previous tracking state cleared")
 
     # Helper function for progress calculation
     def calculate_and_send_progress():
@@ -424,9 +513,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             # CRITICAL: Reset tracker at start of each period
             reset_centroid_tracker()
 
-            # Clear previous positions to prevent cross-period tracking
+            # Clear per-track state to prevent cross-period tracking
             previous_positions.clear()
-            print("🧹 Previous positions cleared for new period")
+            last_known_lane.clear()
+            print("🧹 Per-track state cleared for new period")
 
             # Skip frames until we reach the start of this period (frame-skipping)
             ret = True  # Initialize to True - if no seeking needed, we're already at the right position
@@ -457,7 +547,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     break
 
                 # YOLO detection
-                results = model.predict(frame, conf=CONF_THRESHOLD, verbose=False)
+                results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=True, verbose=False)
                 boxes = results[0].boxes
 
                 input_centroids = []
@@ -482,15 +572,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 for objectID, centroid in objects.items():
                     debug_tracked_objects.add(objectID)
                     cx, cy = centroid
-                    pt = Point(cx, cy)
-                    lane_id = None
 
-                    # Find class for this detection
+                    # Match to detection data
                     class_name = "unknown"
                     matched_detection = None
                     for (det_cx, det_cy), detection_data in detections_map.items():
-                        if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
-                            if len(detection_data) > 4:  # Has class_name
+                        if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
+                            if len(detection_data) > 4:
                                 class_name = detection_data[4]
                             matched_detection = detection_data
                             break
@@ -501,28 +589,35 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                     # Use persistent class: first detection wins (prevents class flip-flopping)
                     class_name = class_counts_by_id.get(objectID, class_name)
-                    # Store class for this object ID (only if not already stored)
                     if objectID not in class_counts_by_id:
                         class_counts_by_id[objectID] = class_name
 
-                    # Find which lane the object is in using wheels-priority approach
+                    # Extract wheels and bbox from matched detection
                     wheels_x, wheels_y = None, None
-                    # Extract wheels position from detection data if available
-                    for (det_cx, det_cy), detection_data in detections_map.items():
-                        if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
-                            if len(detection_data) > 6:  # Has wheels coordinates
-                                wheels_x, wheels_y = detection_data[5], detection_data[6]
-                            break
+                    bbox = None
+                    if matched_detection:
+                        bbox = matched_detection[:4]
+                        if len(matched_detection) > 6:
+                            wheels_x, wheels_y = matched_detection[5], matched_detection[6]
 
-                    # Use wheels-priority detection if wheels data available
-                    if wheels_x is not None and wheels_y is not None:
-                        lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered)
-                    else:
-                        # Fallback to original centroid-only method for compatibility
-                        for lid, buffered_polygon in lane_polygons_buffered:
-                            if buffered_polygon.contains(pt):
-                                lane_id = lid
-                                break
+                    # Detect axles for trucks (accumulate max across frames)
+                    # Sample every 5 frames to reduce computation while maintaining accuracy
+                    # Note: We do NOT store FHWA suffix in class_counts_by_id here to avoid breaking
+                    # subsequent axle detection checks. FHWA is computed on-demand for visualization/output.
+                    if axle_classifier and bbox is not None and frame_count % 5 == 0 and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                        axle_count = axle_classifier.detect_axles(frame, bbox)
+                        if axle_count is not None:
+                            current_max = max_axle_count_by_id.get(objectID, 0)
+                            max_axle_count_by_id[objectID] = max(current_max, axle_count)
+
+                    # Find lane (wheels → centroid → bottom-band fallback)
+                    lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)
+
+                    # Sticky lane: remember last known lane, use as fallback
+                    if lane_id is not None:
+                        last_known_lane[objectID] = lane_id
+                    elif objectID in last_known_lane:
+                        lane_id = last_known_lane[objectID]
 
                     # Initialize position history with bounded size to prevent memory accumulation
                     # CRITICAL: Limit to last 10 positions - we only need recent history for line crossing
@@ -537,38 +632,109 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         previous_positions[objectID] = previous_positions[objectID][-10:]
 
                     # Check finish line crossing
-                    if (
-                        objectID not in counted_ids and
-                        lane_id is not None and
-                        finish_line is not None and
-                        len(previous_positions[objectID]) >= 2
-                    ):
-                        a, b = finish_line
-                        prev = previous_positions[objectID][-2]
-                        curr = previous_positions[objectID][-1]
-                        side_prev = point_side_of_line(prev, a, b)
-                        side_curr = point_side_of_line(curr, a, b)
+                    if objectID not in counted_ids and lane_id is not None and finish_line is not None:
+                        crossed = False
 
-                        if side_prev * side_curr < 0:  # Changed sides
-                            counted_ids.add(objectID)
-                            lane_counts[lane_id] += 1
+                        # Primary: bbox intersects finish line (require min 2 frames tracked)
+                        if bbox is not None and finish_linestring is not None and len(previous_positions[objectID]) >= 2:
+                            bbox_poly = shapely_box(bbox[0], bbox[1], bbox[2], bbox[3])
+                            if bbox_poly.intersects(finish_linestring):
+                                crossed = True
 
-                            # Count detected class only ONCE per unique object ID
-                            if objectID not in detected_classes:
-                                detected_classes[objectID] = class_name
+                        # Fallback: point sign-change (when no bbox available)
+                        if not crossed and len(previous_positions[objectID]) >= 2:
+                            a, b = finish_line
+                            prev = previous_positions[objectID][-2]
+                            curr = previous_positions[objectID][-1]
+                            side_prev = point_side_of_line(prev, a, b)
+                            side_curr = point_side_of_line(curr, a, b)
+                            if side_prev * side_curr < 0:
+                                crossed = True
 
-                            # Use raw detection label (snake_case) directly
-                            vehicle_counts_by_lane[class_name][lane_id] += 1
+                        if crossed:
+                            # Dedup layer 1: bbox overlap (when bbox available)
+                            dominated = False
+                            if bbox is not None:
+                                current_poly = shapely_box(bbox[0], bbox[1], bbox[2], bbox[3])
+                                current_area = current_poly.area
+                                for counted_bbox, counted_at in recently_counted_bboxes:
+                                    if frame_count - counted_at > fps:
+                                        continue
+                                    counted_poly = shapely_box(*counted_bbox)
+                                    if current_poly.intersects(counted_poly):
+                                        overlap = current_poly.intersection(counted_poly).area
+                                        min_area = min(current_area, counted_poly.area)
+                                        if min_area > 0 and overlap / min_area > 0.5:
+                                            dominated = True
+                                            break
 
-                            # Track in minute tracker if enabled (pass raw class name)
-                            if minute_tracker:
-                                minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
+                            # Dedup layer 2: position-based (same lane only, short window)
+                            # This catches bbox=None cases and provides extra safety
+                            if not dominated:
+                                time_window = int(fps * 0.5)  # 0.5 second window
+                                if bbox is not None:
+                                    bbox_height = bbox[3] - bbox[1]
+                                    dist_threshold = max(30, bbox_height * 0.25)
+                                else:
+                                    dist_threshold = 50
+                                for prev_lane, prev_cx, prev_cy, counted_at in recently_counted_positions:
+                                    if frame_count - counted_at > time_window:
+                                        continue
+                                    if prev_lane != lane_id:
+                                        continue
+                                    dist = ((cx - prev_cx)**2 + (cy - prev_cy)**2) ** 0.5
+                                    if dist < dist_threshold:
+                                        dominated = True
+                                        break
 
-                            # Clean up position history for counted vehicle to free memory
-                            del previous_positions[objectID]
+                            if not dominated:
+                                counted_ids.add(objectID)
+                                lane_counts[lane_id] += 1
+                                if bbox is not None:
+                                    recently_counted_bboxes.append((tuple(bbox), frame_count))
+                                recently_counted_positions.append((lane_id, int(cx), int(cy), frame_count))
 
-                            # Detection logging removed for cleaner logs
-                            # print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
+                                # Determine final class name with FHWA-specific label for trucks
+                                final_class_name = class_name
+
+                                # Track axle detection stats for trucks
+                                if class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                                    axle_detection_stats["trucks_detected"] += 1
+                                    axle_detection_stats["detection_by_truck_type"][class_name]["attempted"] += 1
+                                    axle_detection_stats["axle_detection_attempted"] += 1
+
+                                    if axle_classifier and objectID in max_axle_count_by_id:
+                                        axle_count = max_axle_count_by_id[objectID]
+                                        axle_detection_stats["axle_detection_successful"] += 1
+                                        axle_detection_stats["detection_by_truck_type"][class_name]["successful"] += 1
+                                        axle_detection_stats["axle_counts_distribution"][axle_count] = \
+                                            axle_detection_stats["axle_counts_distribution"].get(axle_count, 0) + 1
+
+                                        fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
+                                        if fhwa_class is not None:
+                                            final_class_name = f"{class_name}_fhwa{fhwa_class}"
+                                            axle_detection_stats["fhwa_class_distribution"][fhwa_class] = \
+                                                axle_detection_stats["fhwa_class_distribution"].get(fhwa_class, 0) + 1
+
+                                # Count detected class only ONCE per unique object ID
+                                if objectID not in detected_classes:
+                                    detected_classes[objectID] = final_class_name
+
+                                # Use detection label (with FHWA suffix when available)
+                                vehicle_counts_by_lane[final_class_name][lane_id] += 1
+
+                                # Track in minute tracker if enabled
+                                if minute_tracker:
+                                    minute_tracker.process_vehicle_detection(frame_count, objectID, final_class_name, lane_id)
+
+                                # Clean up per-track state for counted vehicle to free memory
+                                del previous_positions[objectID]
+                                last_known_lane.pop(objectID, None)
+                                max_axle_count_by_id.pop(objectID, None)  # Clean up axle data too
+
+                # Prune dedup lists
+                recently_counted_bboxes = [(b, f) for b, f in recently_counted_bboxes if frame_count - f <= fps]
+                recently_counted_positions = [(l, x, y, f) for l, x, y, f in recently_counted_positions if frame_count - f <= int(fps * 0.5)]
 
                 # Add visualizations if generating output video
                 if generate_video_output and video_writer:
@@ -576,30 +742,27 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     for objectID, centroid in objects.items():
                         cx, cy = int(centroid[0]), int(centroid[1])
 
-                        # Find lane for this object using wheels-priority approach
-                        pt = Point(cx, cy)
-                        lane_id = None
-                        # Try to get wheels position from detections_map
+                        # Find lane for visualization
                         wheels_x, wheels_y = None, None
+                        bbox = None
                         for (det_cx, det_cy), detection_data in detections_map.items():
                             if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
+                                bbox = detection_data[:4]
                                 if len(detection_data) > 6:
                                     wheels_x, wheels_y = detection_data[5], detection_data[6]
                                 break
-
-                        if wheels_x is not None and wheels_y is not None:
-                            lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered)
-                        else:
-                            for lid, buffered_polygon in lane_polygons_buffered:
-                                if buffered_polygon.contains(pt):
-                                    lane_id = lid
-                                    break
+                        lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)
 
                         # Draw bounding box and label only when detection is available
                         if (cx, cy) in detections_map:
                             detection_data = detections_map[(cx, cy)]
                             x1, y1, x2, y2 = detection_data[:4]
                             class_name_viz = class_counts_by_id.get(objectID, detection_data[4] if len(detection_data) > 4 else None)
+                            # Compute FHWA suffix on-demand for visualization
+                            if axle_classifier and class_name_viz and objectID in max_axle_count_by_id:
+                                fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, max_axle_count_by_id[objectID])
+                                if fhwa_viz is not None:
+                                    class_name_viz = f"{class_name_viz}_fhwa{fhwa_viz}"
                             cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
                             # Draw wheels position if available (for debugging)
@@ -665,7 +828,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 break
 
             # YOLO detection
-            results = model.predict(frame, conf=CONF_THRESHOLD, verbose=False)
+            results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=True, verbose=False)
             boxes = results[0].boxes
 
             input_centroids = []
@@ -690,15 +853,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             for objectID, centroid in objects.items():
                 debug_tracked_objects.add(objectID)
                 cx, cy = centroid
-                pt = Point(cx, cy)
-                lane_id = None
 
-                # Find class for this detection
+                # Match to detection data
                 class_name = "unknown"
                 matched_detection = None
                 for (det_cx, det_cy), detection_data in detections_map.items():
-                    if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
-                        if len(detection_data) > 4:  # Has class_name
+                    if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
+                        if len(detection_data) > 4:
                             class_name = detection_data[4]
                         matched_detection = detection_data
                         break
@@ -709,28 +870,35 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                 # Use persistent class: first detection wins (prevents class flip-flopping)
                 class_name = class_counts_by_id.get(objectID, class_name)
-                # Store class for this object ID (only if not already stored)
                 if objectID not in class_counts_by_id:
                     class_counts_by_id[objectID] = class_name
 
-                # Find which lane the object is in using wheels-priority approach
+                # Extract wheels and bbox from matched detection
                 wheels_x, wheels_y = None, None
-                # Extract wheels position from detection data if available
-                for (det_cx, det_cy), detection_data in detections_map.items():
-                    if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:  # Match centroid
-                        if len(detection_data) > 6:  # Has wheels coordinates
-                            wheels_x, wheels_y = detection_data[5], detection_data[6]
-                        break
+                bbox = None
+                if matched_detection:
+                    bbox = matched_detection[:4]
+                    if len(matched_detection) > 6:
+                        wheels_x, wheels_y = matched_detection[5], matched_detection[6]
 
-                # Use wheels-priority detection if wheels data available
-                if wheels_x is not None and wheels_y is not None:
-                    lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered)
-                else:
-                    # Fallback to original centroid-only method for compatibility
-                    for lid, buffered_polygon in lane_polygons_buffered:
-                        if buffered_polygon.contains(pt):
-                            lane_id = lid
-                            break
+                # Detect axles for trucks (accumulate max across frames) - normal mode
+                # Sample every 5 frames to reduce computation while maintaining accuracy
+                # Note: We do NOT store FHWA suffix in class_counts_by_id here to avoid breaking
+                # subsequent axle detection checks. FHWA is computed on-demand for visualization/output.
+                if axle_classifier and bbox is not None and frame_count % 5 == 0 and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                    axle_count = axle_classifier.detect_axles(frame, bbox)
+                    if axle_count is not None:
+                        current_max = max_axle_count_by_id.get(objectID, 0)
+                        max_axle_count_by_id[objectID] = max(current_max, axle_count)
+
+                # Find lane (wheels → centroid → bottom-band fallback)
+                lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)
+
+                # Sticky lane: remember last known lane, use as fallback
+                if lane_id is not None:
+                    last_known_lane[objectID] = lane_id
+                elif objectID in last_known_lane:
+                    lane_id = last_known_lane[objectID]
 
                 # Initialize position history with bounded size to prevent memory accumulation
                 # CRITICAL: Limit to last 10 positions - we only need recent history for line crossing
@@ -745,38 +913,109 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     previous_positions[objectID] = previous_positions[objectID][-10:]
 
                 # Check finish line crossing
-                if (
-                    objectID not in counted_ids and
-                    lane_id is not None and
-                    finish_line is not None and
-                    len(previous_positions[objectID]) >= 2
-                ):
-                    a, b = finish_line
-                    prev = previous_positions[objectID][-2]
-                    curr = previous_positions[objectID][-1]
-                    side_prev = point_side_of_line(prev, a, b)
-                    side_curr = point_side_of_line(curr, a, b)
+                if objectID not in counted_ids and lane_id is not None and finish_line is not None:
+                    crossed = False
 
-                    if side_prev * side_curr < 0:  # Changed sides
-                        counted_ids.add(objectID)
-                        lane_counts[lane_id] += 1
+                    # Primary: bbox intersects finish line (require min 2 frames tracked)
+                    if bbox is not None and finish_linestring is not None and len(previous_positions[objectID]) >= 2:
+                        bbox_poly = shapely_box(bbox[0], bbox[1], bbox[2], bbox[3])
+                        if bbox_poly.intersects(finish_linestring):
+                            crossed = True
 
-                        # Count detected class only ONCE per unique object ID
-                        if objectID not in detected_classes:
-                            detected_classes[objectID] = class_name
+                    # Fallback: point sign-change (when no bbox available)
+                    if not crossed and len(previous_positions[objectID]) >= 2:
+                        a, b = finish_line
+                        prev = previous_positions[objectID][-2]
+                        curr = previous_positions[objectID][-1]
+                        side_prev = point_side_of_line(prev, a, b)
+                        side_curr = point_side_of_line(curr, a, b)
+                        if side_prev * side_curr < 0:
+                            crossed = True
 
-                        # Use raw detection label (snake_case) directly
-                        vehicle_counts_by_lane[class_name][lane_id] += 1
+                    if crossed:
+                        # Dedup layer 1: bbox overlap (when bbox available)
+                        dominated = False
+                        if bbox is not None:
+                            current_poly = shapely_box(bbox[0], bbox[1], bbox[2], bbox[3])
+                            current_area = current_poly.area
+                            for counted_bbox, counted_at in recently_counted_bboxes:
+                                if frame_count - counted_at > fps:
+                                    continue
+                                counted_poly = shapely_box(*counted_bbox)
+                                if current_poly.intersects(counted_poly):
+                                    overlap = current_poly.intersection(counted_poly).area
+                                    min_area = min(current_area, counted_poly.area)
+                                    if min_area > 0 and overlap / min_area > 0.5:
+                                        dominated = True
+                                        break
 
-                        # Track in minute tracker if enabled (pass raw class name)
-                        if minute_tracker:
-                            minute_tracker.process_vehicle_detection(frame_count, objectID, class_name, lane_id)
+                        # Dedup layer 2: position-based (same lane only, short window)
+                        # This catches bbox=None cases and provides extra safety
+                        if not dominated:
+                            time_window = int(fps * 0.5)  # 0.5 second window
+                            if bbox is not None:
+                                bbox_height = bbox[3] - bbox[1]
+                                dist_threshold = max(30, bbox_height * 0.25)
+                            else:
+                                dist_threshold = 50
+                            for prev_lane, prev_cx, prev_cy, counted_at in recently_counted_positions:
+                                if frame_count - counted_at > time_window:
+                                    continue
+                                if prev_lane != lane_id:
+                                    continue
+                                dist = ((cx - prev_cx)**2 + (cy - prev_cy)**2) ** 0.5
+                                if dist < dist_threshold:
+                                    dominated = True
+                                    break
 
-                        # Clean up position history for counted vehicle to free memory
-                        del previous_positions[objectID]
+                        if not dominated:
+                            counted_ids.add(objectID)
+                            lane_counts[lane_id] += 1
+                            if bbox is not None:
+                                recently_counted_bboxes.append((tuple(bbox), frame_count))
+                            recently_counted_positions.append((lane_id, int(cx), int(cy), frame_count))
 
-                        # Detection logging removed for cleaner logs
-                        # print(f"[ATR COUNTED] Vehicle ID={objectID} ({class_name}) | Lane={lane_id} | Lane Total: {lane_counts[lane_id]}")
+                            # Determine final class name with FHWA-specific label for trucks - normal mode
+                            final_class_name = class_name
+
+                            # Track axle detection stats for trucks - normal mode
+                            if class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                                axle_detection_stats["trucks_detected"] += 1
+                                axle_detection_stats["detection_by_truck_type"][class_name]["attempted"] += 1
+                                axle_detection_stats["axle_detection_attempted"] += 1
+
+                                if axle_classifier and objectID in max_axle_count_by_id:
+                                    axle_count = max_axle_count_by_id[objectID]
+                                    axle_detection_stats["axle_detection_successful"] += 1
+                                    axle_detection_stats["detection_by_truck_type"][class_name]["successful"] += 1
+                                    axle_detection_stats["axle_counts_distribution"][axle_count] = \
+                                        axle_detection_stats["axle_counts_distribution"].get(axle_count, 0) + 1
+
+                                    fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
+                                    if fhwa_class is not None:
+                                        final_class_name = f"{class_name}_fhwa{fhwa_class}"
+                                        axle_detection_stats["fhwa_class_distribution"][fhwa_class] = \
+                                            axle_detection_stats["fhwa_class_distribution"].get(fhwa_class, 0) + 1
+
+                            # Count detected class only ONCE per unique object ID
+                            if objectID not in detected_classes:
+                                detected_classes[objectID] = final_class_name
+
+                            # Use detection label (with FHWA suffix when available)
+                            vehicle_counts_by_lane[final_class_name][lane_id] += 1
+
+                            # Track in minute tracker if enabled
+                            if minute_tracker:
+                                minute_tracker.process_vehicle_detection(frame_count, objectID, final_class_name, lane_id)
+
+                            # Clean up per-track state for counted vehicle to free memory
+                            del previous_positions[objectID]
+                            last_known_lane.pop(objectID, None)
+                            max_axle_count_by_id.pop(objectID, None)  # Clean up axle data too
+
+            # Prune dedup lists
+            recently_counted_bboxes = [(b, f) for b, f in recently_counted_bboxes if frame_count - f <= fps]
+            recently_counted_positions = [(l, x, y, f) for l, x, y, f in recently_counted_positions if frame_count - f <= int(fps * 0.5)]
 
             # Add visualizations if generating output video
             if generate_video_output and video_writer:
@@ -784,31 +1023,27 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 for objectID, centroid in objects.items():
                     cx, cy = int(centroid[0]), int(centroid[1])
 
-                    # Find lane for this object using wheels-priority approach
-                    pt = Point(cx, cy)
-                    lane_id = None
-                    # Try to get wheels position from detections_map
+                    # Find lane for visualization
                     wheels_x, wheels_y = None, None
+                    bbox = None
                     for (det_cx, det_cy), detection_data in detections_map.items():
                         if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
+                            bbox = detection_data[:4]
                             if len(detection_data) > 6:
                                 wheels_x, wheels_y = detection_data[5], detection_data[6]
                             break
+                    lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)
 
-                    if wheels_x is not None and wheels_y is not None:
-                        lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered)
-                    else:
-                        for lid, buffered_polygon in lane_polygons_buffered:
-                            if buffered_polygon.contains(pt):
-                                lane_id = lid
-                                break
-
-                    # Draw bounding box if available
                     # Draw bounding box and label only when detection is available
                     if (cx, cy) in detections_map:
                         detection_data = detections_map[(cx, cy)]
                         x1, y1, x2, y2 = detection_data[:4]
                         class_name_viz = class_counts_by_id.get(objectID, detection_data[4] if len(detection_data) > 4 else None)
+                        # Compute FHWA suffix on-demand for visualization
+                        if axle_classifier and class_name_viz and objectID in max_axle_count_by_id:
+                            fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, max_axle_count_by_id[objectID])
+                            if fhwa_viz is not None:
+                                class_name_viz = f"{class_name_viz}_fhwa{fhwa_viz}"
                         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
                         # Draw wheels position if available (for debugging)
@@ -904,10 +1139,27 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     for class_name, lane_data in vehicle_counts_by_lane.items():
         detected_classes_summary[class_name] = sum(lane_data.values())
 
-    return {
+    # Calculate axle detection success rate
+    if axle_detection_stats["axle_detection_attempted"] > 0:
+        axle_detection_stats["success_rate"] = round(
+            axle_detection_stats["axle_detection_successful"] /
+            axle_detection_stats["axle_detection_attempted"] * 100, 1
+        )
+    else:
+        axle_detection_stats["success_rate"] = None
+
+    result = {
         "lane_counts": lane_counts,
         "total_count": total_count,
         "study_type": "ATR",
         "detected_classes": detected_classes_summary,  # Raw detection labels with counts
-        "vehicles": vehicles_by_class  # Raw detection labels by lane: {class_name: {lane_id: count}}
+        "vehicles": vehicles_by_class,  # Raw detection labels by lane: {class_name: {lane_id: count}}
+        "axle_detection_stats": axle_detection_stats if axle_classifier else None
     }
+
+    if orientation_result:
+        result["orientation"] = orientation_result["orientation"]
+        result["orientation_confidence"] = orientation_result["confidence"]
+        result["orientation_model_used"] = "rear" if orientation_result["orientation"] == "rear" else "front"
+
+    return result

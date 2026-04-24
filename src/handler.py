@@ -24,6 +24,7 @@ def handler(event):
     trim_periods = event["input"].get("trim_periods", None)  # Optional trimming periods
     pedestrian_model_key = event["input"].get("pedestrian_model_key", None)  # Optional ped/bike model
     truck_classifier_model_key = event["input"].get("truck_classifier_model_key", None)  # Optional truck subtype classifier
+    axle_detector_model_key = event["input"].get("axle_detector_model_key", None)  # Optional wheel/axle detection model
 
     # Start log capture - all print statements will be captured and uploaded to S3
     log_capture = LogCapture(video_uuid, study_type)
@@ -36,7 +37,7 @@ def handler(event):
                 result = _process_video_job(
                     event, bucket, video_key, video_uuid, lines_data, model_key,
                     queue_url, study_type, generate_video_output, trim_periods,
-                    pedestrian_model_key, truck_classifier_model_key
+                    pedestrian_model_key, truck_classifier_model_key, axle_detector_model_key
                 )
             except Exception as e:
                 # Log the error before it propagates
@@ -63,7 +64,8 @@ def handler(event):
 
 def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_key,
                        queue_url, study_type, generate_video_output, trim_periods,
-                       pedestrian_model_key=None, truck_classifier_model_key=None):
+                       pedestrian_model_key=None, truck_classifier_model_key=None,
+                       axle_detector_model_key=None):
     """Main video processing logic, separated for cleaner log capture."""
     print("🚀 HANDLER STARTED with event: ", event)  # DEBUG
 
@@ -88,6 +90,25 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
         print(f"✅ Truck classifier model downloaded: {truck_classifier_model_path}")
     except Exception:
         print("ℹ️ No truck classifier model found, skipping truck subtype classification")
+
+    # Download axle detector model (explicit key or fallback to known path)
+    axle_detector_model_path = None
+    ad_key = axle_detector_model_key or "models/best_axle_detector.pt"
+    try:
+        axle_detector_model_path = download_s3_file(bucket, ad_key, "best_axle_detector.pt")
+        print(f"✅ Axle detector model downloaded: {axle_detector_model_path}")
+    except Exception:
+        print("ℹ️ No axle detector model found, skipping FHWA axle-based classification")
+
+    # Download rear-facing model if available (for ATR auto-orientation detection)
+    rear_model_path = None
+    if study_type.upper() == "ATR":
+        rear_model_key = "models/best_rear.pt"
+        try:
+            rear_model_path = download_s3_file(bucket, rear_model_key, "best_rear.pt")
+            print(f"✅ Rear model downloaded: {rear_model_path}")
+        except Exception:
+            print("ℹ️ No rear model found, skipping orientation auto-detection")
 
     def progress_callback(progress_data):
         send_sqs_message(queue_url, {
@@ -132,7 +153,9 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
         output_video_path=output_video_path,
         trim_periods=trim_periods,
         pedestrian_model_path=ped_model_path,
-        truck_classifier_model_path=truck_classifier_model_path
+        truck_classifier_model_path=truck_classifier_model_path,
+        rear_model_path=rear_model_path,
+        axle_detector_model_path=axle_detector_model_path
     )
 
     # CRITICAL: Clean up input video file to prevent disk accumulation
