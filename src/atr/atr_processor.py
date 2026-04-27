@@ -159,6 +159,27 @@ def point_side_of_line(p, a, b):
     return (float(b[0]) - float(a[0])) * (float(p[1]) - float(a[1])) - (float(b[1]) - float(a[1])) * (float(p[0]) - float(a[0]))
 
 
+def _match_track_to_detection(tracker_centroid, detections_map):
+    """Pick the geometrically nearest detection within ±20 px (axis-aligned box)
+    of the tracker centroid. Returns (detection_data, det_index, distance_px) or
+    (None, None, None) when no detection is within the box.
+
+    Replaces the legacy first-hit lookup (which iterated detections_map in
+    confidence-descending insertion order and was systematically biased toward
+    the highest-confidence detection — the engine of the H9 stale-centroid
+    hijack and a cross-binding hazard for two tracks with nearby centroids).
+    """
+    cx, cy = tracker_centroid
+    best = best_idx = best_d2 = None
+    for det_idx, ((det_cx, det_cy), detection_data) in enumerate(detections_map.items()):
+        if abs(det_cx - cx) >= 20 or abs(det_cy - cy) >= 20:
+            continue
+        d2 = (det_cx - cx) ** 2 + (det_cy - cy) ** 2
+        if best_d2 is None or d2 < best_d2:
+            best, best_idx, best_d2 = detection_data, det_idx, d2
+    return best, best_idx, (best_d2 ** 0.5 if best_d2 is not None else None)
+
+
 def find_vehicle_lane_with_source(cx, cy, wx, wy, lane_polygons_buffered, bbox=None):
     """Same priority order as find_vehicle_lane, but returns (lane_id, source).
 
@@ -1026,22 +1047,42 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                 # Process tracked objects
                 for objectID, centroid in objects.items():
+                    # F7: skip tracks that didn't match this frame. Their stale centroid
+                    # would otherwise hijack a foreign detection in the matching loop
+                    # (overcount.md H9). The track is preserved in tracker.objects until
+                    # it either re-acquires a detection or hits max_disappeared.
+                    if tracker.disappeared.get(objectID, 0) > 0:
+                        if is_diag_frame:
+                            debug_emitter.emit_track_match(
+                                frame_count=frame_count,
+                                object_id=objectID,
+                                tracker_centroid=centroid,
+                                disappeared_count=tracker.disappeared.get(objectID, 0),
+                                matched_detection_index=None,
+                                match_distance_px=None,
+                                matched_bbox=None,
+                                matched_class=None,
+                                matched_wheels=None,
+                                cached_class=class_counts_by_id.get(objectID),
+                                lane_id=last_known_lane.get(objectID),
+                                lane_source=None,
+                                previous_positions_tail=previous_positions.get(objectID),
+                                was_skipped_for_disappeared=True,
+                            )
+                        continue
+
                     debug_tracked_objects.add(objectID)
                     cx, cy = centroid
 
-                    # Match to detection data
-                    class_name = "unknown"
-                    matched_detection = None
-                    matched_detection_index = None
-                    match_distance_px = None
-                    for det_idx, ((det_cx, det_cy), detection_data) in enumerate(detections_map.items()):
-                        if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
-                            if len(detection_data) > 4:
-                                class_name = detection_data[4]
-                            matched_detection = detection_data
-                            matched_detection_index = det_idx
-                            match_distance_px = ((det_cx - cx) ** 2 + (det_cy - cy) ** 2) ** 0.5
-                            break
+                    # Match track to nearest detection within ±20 px (F8 — order-independent).
+                    matched_detection, matched_detection_index, match_distance_px = (
+                        _match_track_to_detection(centroid, detections_map)
+                    )
+                    class_name = (
+                        matched_detection[4]
+                        if matched_detection and len(matched_detection) > 4
+                        else "unknown"
+                    )
 
                     # Refine articulated_truck class on first detection of this track
                     if class_name == "articulated_truck" and truck_classifier and objectID not in class_counts_by_id and matched_detection:
@@ -1173,8 +1214,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                             dedup_layer = "bbox_overlap"
                                             break
 
-                            # Dedup layer 2: position-based (same lane only, short window)
-                            # This catches bbox=None cases and provides extra safety
+                            # Dedup layer 2: position-based (same lane only, short window).
+                            # Compares the wheels-based crossing_point — same reference
+                            # point used by the cross test — instead of the mid-bbox
+                            # tracker centroid (overcount.md H4(c)).
                             if not dedup_dominated:
                                 time_window = int(fps * 0.5)  # 0.5 second window
                                 if bbox is not None:
@@ -1182,12 +1225,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                     dist_threshold = max(30, bbox_height * 0.25)
                                 else:
                                     dist_threshold = 50
+                                ref_x, ref_y = crossing_point
                                 for prev_lane, prev_cx, prev_cy, counted_at in recently_counted_positions:
                                     if frame_count - counted_at > time_window:
                                         continue
                                     if prev_lane != lane_id:
                                         continue
-                                    dist = ((cx - prev_cx)**2 + (cy - prev_cy)**2) ** 0.5
+                                    dist = ((ref_x - prev_cx)**2 + (ref_y - prev_cy)**2) ** 0.5
                                     if dist < dist_threshold:
                                         dedup_dominated = True
                                         dedup_layer = "position"
@@ -1199,7 +1243,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 lane_counts[lane_id] += 1
                                 if bbox is not None:
                                     recently_counted_bboxes.append((tuple(bbox), frame_count))
-                                recently_counted_positions.append((lane_id, int(cx), int(cy), frame_count))
+                                recently_counted_positions.append(
+                                    (lane_id, int(crossing_point[0]), int(crossing_point[1]), frame_count)
+                                )
 
                                 # Determine final class name with FHWA-specific label for trucks
                                 # Track axle detection stats for trucks
@@ -1271,15 +1317,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     for objectID, centroid in objects.items():
                         cx, cy = int(centroid[0]), int(centroid[1])
 
-                        # Find lane for visualization
-                        wheels_x, wheels_y = None, None
-                        bbox = None
-                        for (det_cx, det_cy), detection_data in detections_map.items():
-                            if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
-                                bbox = detection_data[:4]
-                                if len(detection_data) > 6:
-                                    wheels_x, wheels_y = detection_data[5], detection_data[6]
-                                break
+                        # Find lane for visualization (nearest detection within ±20 px).
+                        matched_detection_viz, _, _ = _match_track_to_detection(
+                            (cx, cy), detections_map,
+                        )
+                        bbox = matched_detection_viz[:4] if matched_detection_viz else None
+                        wheels_x = wheels_y = None
+                        if matched_detection_viz and len(matched_detection_viz) > 6:
+                            wheels_x, wheels_y = matched_detection_viz[5], matched_detection_viz[6]
                         lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)
 
                         # Draw bounding box and label only when detection is available
@@ -1387,22 +1432,39 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
             # Process tracked objects
             for objectID, centroid in objects.items():
+                # F7: skip tracks that didn't match this frame. See trim-mode for full rationale.
+                if tracker.disappeared.get(objectID, 0) > 0:
+                    if is_diag_frame:
+                        debug_emitter.emit_track_match(
+                            frame_count=frame_count,
+                            object_id=objectID,
+                            tracker_centroid=centroid,
+                            disappeared_count=tracker.disappeared.get(objectID, 0),
+                            matched_detection_index=None,
+                            match_distance_px=None,
+                            matched_bbox=None,
+                            matched_class=None,
+                            matched_wheels=None,
+                            cached_class=class_counts_by_id.get(objectID),
+                            lane_id=last_known_lane.get(objectID),
+                            lane_source=None,
+                            previous_positions_tail=previous_positions.get(objectID),
+                            was_skipped_for_disappeared=True,
+                        )
+                    continue
+
                 debug_tracked_objects.add(objectID)
                 cx, cy = centroid
 
-                # Match to detection data
-                class_name = "unknown"
-                matched_detection = None
-                matched_detection_index = None
-                match_distance_px = None
-                for det_idx, ((det_cx, det_cy), detection_data) in enumerate(detections_map.items()):
-                    if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
-                        if len(detection_data) > 4:
-                            class_name = detection_data[4]
-                        matched_detection = detection_data
-                        matched_detection_index = det_idx
-                        match_distance_px = ((det_cx - cx) ** 2 + (det_cy - cy) ** 2) ** 0.5
-                        break
+                # Match track to nearest detection within ±20 px (F8 — order-independent).
+                matched_detection, matched_detection_index, match_distance_px = (
+                    _match_track_to_detection(centroid, detections_map)
+                )
+                class_name = (
+                    matched_detection[4]
+                    if matched_detection and len(matched_detection) > 4
+                    else "unknown"
+                )
 
                 # Refine articulated_truck class on first detection of this track
                 if class_name == "articulated_truck" and truck_classifier and objectID not in class_counts_by_id and matched_detection:
@@ -1534,8 +1596,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                         dedup_layer = "bbox_overlap"
                                         break
 
-                        # Dedup layer 2: position-based (same lane only, short window)
-                        # This catches bbox=None cases and provides extra safety
+                        # Dedup layer 2: position-based (same lane only, short window).
+                        # Compares the wheels-based crossing_point — same reference
+                        # point used by the cross test — instead of the mid-bbox
+                        # tracker centroid (overcount.md H4(c)).
                         if not dedup_dominated:
                             time_window = int(fps * 0.5)  # 0.5 second window
                             if bbox is not None:
@@ -1543,12 +1607,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 dist_threshold = max(30, bbox_height * 0.25)
                             else:
                                 dist_threshold = 50
+                            ref_x, ref_y = crossing_point
                             for prev_lane, prev_cx, prev_cy, counted_at in recently_counted_positions:
                                 if frame_count - counted_at > time_window:
                                     continue
                                 if prev_lane != lane_id:
                                     continue
-                                dist = ((cx - prev_cx)**2 + (cy - prev_cy)**2) ** 0.5
+                                dist = ((ref_x - prev_cx)**2 + (ref_y - prev_cy)**2) ** 0.5
                                 if dist < dist_threshold:
                                     dedup_dominated = True
                                     dedup_layer = "position"
@@ -1560,7 +1625,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             lane_counts[lane_id] += 1
                             if bbox is not None:
                                 recently_counted_bboxes.append((tuple(bbox), frame_count))
-                            recently_counted_positions.append((lane_id, int(cx), int(cy), frame_count))
+                            recently_counted_positions.append(
+                                (lane_id, int(crossing_point[0]), int(crossing_point[1]), frame_count)
+                            )
 
                             # Determine final class name with FHWA-specific label for trucks - normal mode
                             # Track axle detection stats for trucks - normal mode
@@ -1632,15 +1699,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 for objectID, centroid in objects.items():
                     cx, cy = int(centroid[0]), int(centroid[1])
 
-                    # Find lane for visualization
-                    wheels_x, wheels_y = None, None
-                    bbox = None
-                    for (det_cx, det_cy), detection_data in detections_map.items():
-                        if abs(det_cx - cx) < 20 and abs(det_cy - cy) < 20:
-                            bbox = detection_data[:4]
-                            if len(detection_data) > 6:
-                                wheels_x, wheels_y = detection_data[5], detection_data[6]
-                            break
+                    # Find lane for visualization (nearest detection within ±20 px).
+                    matched_detection_viz, _, _ = _match_track_to_detection(
+                        (cx, cy), detections_map,
+                    )
+                    bbox = matched_detection_viz[:4] if matched_detection_viz else None
+                    wheels_x = wheels_y = None
+                    if matched_detection_viz and len(matched_detection_viz) > 6:
+                        wheels_x, wheels_y = matched_detection_viz[5], matched_detection_viz[6]
                     lane_id = find_vehicle_lane(cx, cy, wheels_x, wheels_y, lane_polygons_buffered, bbox=bbox)
 
                     # Draw bounding box and label only when detection is available
