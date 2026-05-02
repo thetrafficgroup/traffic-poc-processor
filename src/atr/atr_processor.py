@@ -748,42 +748,16 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     if not frame_ranges:
         total_processing_frames = total_frames
 
-    # Auto-detect vehicle orientation if rear model is available
+    # ATR uses the rear-view detection model as the primary; if it isn't
+    # available (e.g. S3 download failed or the key is missing) fall back to
+    # the general-purpose vehicle model so processing still works.
     orientation_result = None
     if rear_model_path:
-        from .orientation_detector import detect_vehicle_orientation
-
-        cal_start_frame = 0
-        if frame_ranges:
-            cal_start_frame = frame_ranges[0]["start_frame"]
-
-        print("🔍 Running vehicle orientation calibration...")
-        orientation_result = detect_vehicle_orientation(
-            VIDEO_PATH, MODEL_PATH, fps,
-            calibration_seconds=30, min_vehicles=3,
-            start_frame=cal_start_frame
-        )
-
-        print(f"🔍 Orientation result: {orientation_result['orientation']} "
-              f"(confidence={orientation_result['confidence']:.2f}, "
-              f"vehicles={orientation_result['vehicles_analyzed']})")
-
-        # Load the appropriate model based on calibration result
-        if orientation_result["orientation"] == "rear":
-            model = YOLO(rear_model_path)
-            print(f"✅ Rear YOLO model loaded: {rear_model_path}")
-        else:
-            model = YOLO(MODEL_PATH)
-            print(f"✅ Front YOLO model loaded: {MODEL_PATH}")
-
-        # Re-open video capture to reset frame position after calibration consumed frames
-        cap.release()
-        cap = cv2.VideoCapture(VIDEO_PATH)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
+        model = YOLO(rear_model_path)
+        print(f"✅ Rear-view YOLO model loaded (primary): {rear_model_path}")
     else:
         model = YOLO(MODEL_PATH)
-        print(f"✅ YOLO model loaded: {MODEL_PATH}")
+        print(f"⚠️ Rear-view model not found, falling back to general model: {MODEL_PATH}")
 
     # Initialize minute tracker if callback provided
     minute_tracker = None
