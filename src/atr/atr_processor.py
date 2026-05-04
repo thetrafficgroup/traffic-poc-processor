@@ -44,25 +44,21 @@ class CentroidTracker:
             for centroid in input_centroids:
                 self.register(centroid)
         else:
+            from scipy.optimize import linear_sum_assignment
             objectIDs = list(self.objects.keys())
             objectCentroids = list(self.objects.values())
             D = np.linalg.norm(np.array(objectCentroids)[:, np.newaxis] - input_centroids, axis=2)
-            rows = D.min(axis=1).argsort()
-            cols = D.argmin(axis=1)[rows]
-
+            row_ind, col_ind = linear_sum_assignment(D)
             used_rows = set()
             used_cols = set()
-
-            for (row, col) in zip(rows, cols):
-                if row in used_rows or col in used_cols:
+            for r, c in zip(row_ind, col_ind):
+                if D[r, c] > self.max_distance:
                     continue
-                if D[row, col] > self.max_distance:
-                    continue
-                objectID = objectIDs[row]
-                self.objects[objectID] = input_centroids[col]
+                objectID = objectIDs[r]
+                self.objects[objectID] = input_centroids[c]
                 self.disappeared[objectID] = 0
-                used_rows.add(row)
-                used_cols.add(col)
+                used_rows.add(r)
+                used_cols.add(c)
 
             unused_rows = set(range(0, D.shape[0])).difference(used_rows)
             unused_cols = set(range(0, D.shape[1])).difference(used_cols)
@@ -674,7 +670,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             trim_periods = None
 
     # Constants
-    CONF_THRESHOLD = 0.1
+    CONF_THRESHOLD = 0.03
 
     # Initialize video capture
     cap = cv2.VideoCapture(VIDEO_PATH)
@@ -700,7 +696,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     lane_polygons = [(lane["id"], Polygon(lane["points"])) for lane in lanes]
     lane_counts = {lane_id: 0 for lane_id, _ in lane_polygons}
     # Cache buffered polygons for performance optimization
-    lane_polygons_buffered = [(lane_id, polygon.buffer(8)) for lane_id, polygon in lane_polygons]
+    lane_polygons_buffered = [(lane_id, polygon.buffer(0)) for lane_id, polygon in lane_polygons]
     
     # Process finish line
     finish_line = LINES_DATA.get("finish_line")
@@ -727,8 +723,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         truck_classifier_model_path=truck_classifier_model_path,
         axle_detector_model_path=axle_detector_model_path,
         conf_threshold=CONF_THRESHOLD,
-        agnostic_nms=True,
+        agnostic_nms=False,
         iou_threshold_default_ultralytics=0.7,
+        imgsz=1408,
+        lane_polygon_buffer_px=0,
         tracker={"max_disappeared": 15, "max_distance": 150},
         dedup={
             "bbox_window_seconds": 1.0,
@@ -1038,7 +1036,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     break
 
                 # YOLO detection
-                results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=True, verbose=False)
+                results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=False, verbose=False, imgsz=1408)
                 boxes = results[0].boxes
 
                 input_centroids = []
@@ -1435,7 +1433,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 break
 
             # YOLO detection
-            results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=True, verbose=False)
+            results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=False, verbose=False, imgsz=1408)
             boxes = results[0].boxes
 
             input_centroids = []
