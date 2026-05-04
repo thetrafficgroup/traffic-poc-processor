@@ -180,6 +180,49 @@ def _match_track_to_detection(tracker_centroid, detections_map):
     return best, best_idx, (best_d2 ** 0.5 if best_d2 is not None else None)
 
 
+_CLASS_VOTE_HYSTERESIS = 3
+
+
+def _update_track_class(objectID, raw_class, conf, class_counts_by_id,
+                       class_score_by_id, challenger_run_by_id,
+                       articulated_subtype_by_id, hysteresis=_CLASS_VOTE_HYSTERESIS):
+    """Cumulative-confidence vote per track with N-frame run-length hysteresis;
+    routes raw articulated/multi labels through the cached truck-subtype."""
+    canonical = (articulated_subtype_by_id.get(objectID, raw_class)
+                 if raw_class in ("articulated_truck", "multi_articulated_truck")
+                 else raw_class)
+    scores = class_score_by_id.setdefault(objectID, defaultdict(float))
+    scores[canonical] += float(conf)
+    argmax_class = max(scores, key=scores.get)
+
+    if objectID not in class_counts_by_id:
+        class_counts_by_id[objectID] = argmax_class
+        challenger_run_by_id[objectID] = (argmax_class, 1)
+        return argmax_class
+
+    current = class_counts_by_id[objectID]
+    if argmax_class == current:
+        challenger_run_by_id[objectID] = (current, 1)
+        return current
+
+    challenger, count = challenger_run_by_id.get(objectID, (None, 0))
+    count = count + 1 if challenger == argmax_class else 1
+    if count >= hysteresis:
+        class_counts_by_id[objectID] = argmax_class
+        challenger_run_by_id[objectID] = (argmax_class, 1)
+        return argmax_class
+    challenger_run_by_id[objectID] = (argmax_class, count)
+    return current
+
+
+def _get_display_axle_count(objectID, axle_history_by_id, min_samples=3):
+    """Mode of recent axle reads once we have ``min_samples``+; else None."""
+    history = axle_history_by_id.get(objectID)
+    if not history or len(history) < min_samples:
+        return None
+    return Counter(history).most_common(1)[0][0]
+
+
 def find_vehicle_lane_with_source(cx, cy, wx, wy, lane_polygons_buffered, bbox=None):
     """Same priority order as find_vehicle_lane, but returns (lane_id, source).
 
@@ -703,7 +746,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     debug_tracked_objects = set()
     detected_classes = {}
     class_counts_by_id = {}
-    max_axle_count_by_id = {}  # Track maximum axle count per vehicle for FHWA classification
+    class_score_by_id = {}
+    challenger_run_by_id = {}
+    articulated_subtype_by_id = {}
+    max_axle_count_by_id = {}  # used for the count's FHWA suffix
+    axle_history_by_id = {}    # used for the displayed FHWA suffix (stable mode)
 
     # Axle detection statistics for debugging and analysis
     axle_detection_stats = {
@@ -1003,10 +1050,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                         class_id = int(box.cls[0].cpu().numpy())
                         class_name = model.names[class_id]
+                        conf = float(box.conf[0].cpu().numpy())
                         cx, cy = get_centroid((x1, y1, x2, y2))
                         wx, wy = get_wheels_position((x1, y1, x2, y2))
                         input_centroids.append(np.array([cx, cy]))
-                        detections_map[(cx, cy)] = (x1, y1, x2, y2, class_name, wx, wy)
+                        detections_map[(cx, cy)] = (x1, y1, x2, y2, class_name, wx, wy, conf)
                         debug_total_detections += 1
 
                 # Update tracker
@@ -1052,21 +1100,24 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     matched_detection, matched_detection_index, match_distance_px = (
                         _match_track_to_detection(centroid, detections_map)
                     )
-                    class_name = (
-                        matched_detection[4]
-                        if matched_detection and len(matched_detection) > 4
-                        else "unknown"
-                    )
+                    raw_class = matched_detection[4] if matched_detection else "unknown"
+                    raw_conf = matched_detection[7] if matched_detection else 0.0
 
-                    # Refine articulated_truck class on first detection of this track
-                    if class_name == "articulated_truck" and truck_classifier and objectID not in class_counts_by_id and matched_detection:
-                        class_name = truck_classifier.classify(frame, matched_detection[:4])
+                    if matched_detection and objectID not in articulated_subtype_by_id:
+                        if raw_class == "articulated_truck" and truck_classifier:
+                            articulated_subtype_by_id[objectID] = truck_classifier.classify(
+                                frame, matched_detection[:4])
+                        elif raw_class == "multi_articulated_truck":
+                            articulated_subtype_by_id[objectID] = raw_class
 
-                    # Use persistent class: first detection wins (prevents class flip-flopping)
                     cached_class = class_counts_by_id.get(objectID)
-                    class_name = class_counts_by_id.get(objectID, class_name)
-                    if objectID not in class_counts_by_id:
-                        class_counts_by_id[objectID] = class_name
+                    if matched_detection:
+                        class_name = _update_track_class(
+                            objectID, raw_class, raw_conf, class_counts_by_id,
+                            class_score_by_id, challenger_run_by_id,
+                            articulated_subtype_by_id)
+                    else:
+                        class_name = class_counts_by_id.get(objectID, raw_class)
 
                     # Extract wheels and bbox from matched detection
                     wheels_x, wheels_y = None, None
@@ -1085,6 +1136,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         if axle_count is not None:
                             current_max = max_axle_count_by_id.get(objectID, 0)
                             max_axle_count_by_id[objectID] = max(current_max, axle_count)
+                            history = axle_history_by_id.setdefault(objectID, [])
+                            history.append(axle_count)
+                            if len(history) > 20:
+                                del history[0]
 
                     # Find lane (wheels → centroid → bottom-band → full-bbox fallback)
                     lane_id, lane_source = find_vehicle_lane_with_source(
@@ -1256,6 +1311,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 del previous_positions[objectID]
                                 last_known_lane.pop(objectID, None)
                                 max_axle_count_by_id.pop(objectID, None)  # Clean up axle data too
+                                axle_history_by_id.pop(objectID, None)
+                                class_score_by_id.pop(objectID, None)
+                                challenger_run_by_id.pop(objectID, None)
+                                articulated_subtype_by_id.pop(objectID, None)
 
                         debug_emitter.emit_count_decision(
                             frame_count=frame_count,
@@ -1306,9 +1365,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             detection_data = detections_map[(cx, cy)]
                             x1, y1, x2, y2 = detection_data[:4]
                             class_name_viz = class_counts_by_id.get(objectID, detection_data[4] if len(detection_data) > 4 else None)
-                            # Compute FHWA suffix on-demand for visualization
-                            if axle_classifier and class_name_viz and objectID in max_axle_count_by_id:
-                                fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, max_axle_count_by_id[objectID])
+                            display_axles = _get_display_axle_count(objectID, axle_history_by_id)
+                            if axle_classifier and class_name_viz and display_axles is not None:
+                                fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, display_axles)
                                 if fhwa_viz is not None:
                                     class_name_viz = f"{class_name_viz}_fhwa{fhwa_viz}"
                             cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
@@ -1388,10 +1447,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
                     class_id = int(box.cls[0].cpu().numpy())
                     class_name = model.names[class_id]
+                    conf = float(box.conf[0].cpu().numpy())
                     cx, cy = get_centroid((x1, y1, x2, y2))
                     wx, wy = get_wheels_position((x1, y1, x2, y2))
                     input_centroids.append(np.array([cx, cy]))
-                    detections_map[(cx, cy)] = (x1, y1, x2, y2, class_name, wx, wy)
+                    detections_map[(cx, cy)] = (x1, y1, x2, y2, class_name, wx, wy, conf)
                     debug_total_detections += 1
 
             # Update tracker
@@ -1434,21 +1494,24 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 matched_detection, matched_detection_index, match_distance_px = (
                     _match_track_to_detection(centroid, detections_map)
                 )
-                class_name = (
-                    matched_detection[4]
-                    if matched_detection and len(matched_detection) > 4
-                    else "unknown"
-                )
+                raw_class = matched_detection[4] if matched_detection else "unknown"
+                raw_conf = matched_detection[7] if matched_detection else 0.0
 
-                # Refine articulated_truck class on first detection of this track
-                if class_name == "articulated_truck" and truck_classifier and objectID not in class_counts_by_id and matched_detection:
-                    class_name = truck_classifier.classify(frame, matched_detection[:4])
+                if matched_detection and objectID not in articulated_subtype_by_id:
+                    if raw_class == "articulated_truck" and truck_classifier:
+                        articulated_subtype_by_id[objectID] = truck_classifier.classify(
+                            frame, matched_detection[:4])
+                    elif raw_class == "multi_articulated_truck":
+                        articulated_subtype_by_id[objectID] = raw_class
 
-                # Use persistent class: first detection wins (prevents class flip-flopping)
                 cached_class = class_counts_by_id.get(objectID)
-                class_name = class_counts_by_id.get(objectID, class_name)
-                if objectID not in class_counts_by_id:
-                    class_counts_by_id[objectID] = class_name
+                if matched_detection:
+                    class_name = _update_track_class(
+                        objectID, raw_class, raw_conf, class_counts_by_id,
+                        class_score_by_id, challenger_run_by_id,
+                        articulated_subtype_by_id)
+                else:
+                    class_name = class_counts_by_id.get(objectID, raw_class)
 
                 # Extract wheels and bbox from matched detection
                 wheels_x, wheels_y = None, None
@@ -1467,6 +1530,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     if axle_count is not None:
                         current_max = max_axle_count_by_id.get(objectID, 0)
                         max_axle_count_by_id[objectID] = max(current_max, axle_count)
+                        history = axle_history_by_id.setdefault(objectID, [])
+                        history.append(axle_count)
+                        if len(history) > 20:
+                            del history[0]
 
                 # Find lane (wheels → centroid → bottom-band → full-bbox fallback)
                 lane_id, lane_source = find_vehicle_lane_with_source(
@@ -1638,6 +1705,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             del previous_positions[objectID]
                             last_known_lane.pop(objectID, None)
                             max_axle_count_by_id.pop(objectID, None)  # Clean up axle data too
+                            axle_history_by_id.pop(objectID, None)
+                            class_score_by_id.pop(objectID, None)
+                            challenger_run_by_id.pop(objectID, None)
+                            articulated_subtype_by_id.pop(objectID, None)
 
                     debug_emitter.emit_count_decision(
                         frame_count=frame_count,
@@ -1688,9 +1759,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         detection_data = detections_map[(cx, cy)]
                         x1, y1, x2, y2 = detection_data[:4]
                         class_name_viz = class_counts_by_id.get(objectID, detection_data[4] if len(detection_data) > 4 else None)
-                        # Compute FHWA suffix on-demand for visualization
-                        if axle_classifier and class_name_viz and objectID in max_axle_count_by_id:
-                            fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, max_axle_count_by_id[objectID])
+                        display_axles = _get_display_axle_count(objectID, axle_history_by_id)
+                        if axle_classifier and class_name_viz and display_axles is not None:
+                            fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, display_axles)
                             if fhwa_viz is not None:
                                 class_name_viz = f"{class_name_viz}_fhwa{fhwa_viz}"
                         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
