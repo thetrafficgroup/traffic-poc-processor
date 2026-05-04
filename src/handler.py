@@ -82,14 +82,17 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
         ped_model_path = download_s3_file(bucket, pedestrian_model_key, "best_pedestrian.pt")
         print(f"✅ Pedestrian model downloaded: {ped_model_path}")
 
-    # Download truck classifier model (explicit key or fallback to known path)
+    # Download truck classifier model (explicit opt-in only — current model is OOD-broken,
+    # confidently mis-labels non-trucks as multi_articulated. Will be re-enabled after retrain).
     truck_classifier_model_path = None
-    tc_key = truck_classifier_model_key or "models/best_truck_classifier.pt"
-    try:
-        truck_classifier_model_path = download_s3_file(bucket, tc_key, "best_truck_classifier.pt")
-        print(f"✅ Truck classifier model downloaded: {truck_classifier_model_path}")
-    except Exception:
-        print("ℹ️ No truck classifier model found, skipping truck subtype classification")
+    if truck_classifier_model_key:
+        try:
+            truck_classifier_model_path = download_s3_file(bucket, truck_classifier_model_key, "best_truck_classifier.pt")
+            print(f"✅ Truck classifier model downloaded: {truck_classifier_model_path}")
+        except Exception:
+            print("ℹ️ Truck classifier model not found at requested key, skipping")
+    else:
+        print("ℹ️ Truck classifier disabled by default (opt-in via truck_classifier_model_key)")
 
     # Download axle detector model (explicit key or fallback to known path)
     axle_detector_model_path = None

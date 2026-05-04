@@ -672,6 +672,39 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Constants
     CONF_THRESHOLD = 0.03
 
+    # Per-class post-prediction filter — drops false-positive truck/bus/motorcycle
+    # detections that the wide CONF_THRESHOLD lets through. Cars/pickups are
+    # untouched so far-lane recovery (small bboxes) keeps working.
+    _CLASS_FILTER = {
+        "articulated_truck":   {"conf": 0.40, "min_h": 100},
+        "single_unit_truck":   {"conf": 0.30, "min_h":  60},
+        "bus":                 {"conf": 0.30, "min_h":   0},
+        "motorcycle":          {"conf": 0.10, "min_h":   0},
+    }
+    def _filter_predictions(_results, _model_names):
+        if _results is None or _results[0].boxes is None or len(_results[0].boxes) == 0:
+            return _results
+        try:
+            import torch as _t
+            _boxes = _results[0].boxes
+            keep = []
+            for _i, _b in enumerate(_boxes):
+                _cls = _model_names[int(_b.cls)]
+                _rule = _CLASS_FILTER.get(_cls)
+                if _rule is None:
+                    keep.append(_i); continue
+                _cf = float(_b.conf)
+                _y1, _y2 = float(_b.xyxy[0][1]), float(_b.xyxy[0][3])
+                if _cf >= _rule["conf"] and (_y2 - _y1) >= _rule["min_h"]:
+                    keep.append(_i)
+            if len(keep) == len(_boxes):
+                return _results
+            _results[0].boxes = _boxes[_t.tensor(keep, dtype=_t.long, device=_boxes.data.device)] if keep else _boxes[:0]
+            return _results
+        except Exception as _e:
+            print(f"[CLASS_FILTER] err: {_e}")
+            return _results
+
     # Initialize video capture
     cap = cv2.VideoCapture(VIDEO_PATH)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -1037,6 +1070,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                 # YOLO detection
                 results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=False, verbose=False, imgsz=1408)
+                results = _filter_predictions(results, model.names)
                 boxes = results[0].boxes
 
                 input_centroids = []
@@ -1434,6 +1468,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
             # YOLO detection
             results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=False, verbose=False, imgsz=1408)
+            results = _filter_predictions(results, model.names)
             boxes = results[0].boxes
 
             input_centroids = []
