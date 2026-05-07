@@ -82,7 +82,11 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
         ped_model_path = download_s3_file(bucket, pedestrian_model_key, "best_pedestrian.pt")
         print(f"✅ Pedestrian model downloaded: {ped_model_path}")
 
-    # Download truck classifier model (explicit key or fallback to known path)
+    # Download truck classifier model (explicit key or fallback to known path).
+    # The classifier runs with a high confidence threshold (see TruckClassifier
+    # default) so only very-confident multi_articulated calls survive — the
+    # rest stay as articulated_truck. Combined with the per-class filter in
+    # atr_processor, this keeps the multi_articulated false-positive rate down.
     truck_classifier_model_path = None
     tc_key = truck_classifier_model_key or "models/best_truck_classifier.pt"
     try:

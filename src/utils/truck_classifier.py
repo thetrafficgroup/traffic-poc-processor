@@ -27,12 +27,17 @@ class TruckClassifier:
     into 'articulated_truck' or 'multi_articulated_truck'.
     """
 
-    def __init__(self, model_path: str, confidence_threshold: float = 0.7):
+    def __init__(self, model_path: str, confidence_threshold: float = 0.9):
         """
         Args:
             model_path: Path to the YOLOv8-cls truck classifier weights.
             confidence_threshold: Minimum confidence to accept 'multi_articulated_truck'.
                 Below this threshold, the detection stays as 'articulated_truck'.
+                Default raised from 0.7 → 0.9: the current trained classifier
+                is over-confident on out-of-distribution crops, so we require
+                a higher confidence margin before promoting to multi.
+                Will be revisited once the classifier is retrained with broader
+                negative samples (see truck-detector labeler section).
         """
         self.model = YOLO(model_path)
         self.confidence_threshold = confidence_threshold
