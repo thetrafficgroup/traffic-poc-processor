@@ -6,6 +6,7 @@ from shapely.geometry import Point, Polygon, LineString, box as shapely_box
 from ultralytics import YOLO
 from collections import OrderedDict, Counter, defaultdict
 from .atr_minute_tracker import ATRMinuteTracker
+from .sahi_helper import sliced_predict, derive_lane_region
 import sys
 import os
 import torch
@@ -730,7 +731,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     lane_counts = {lane_id: 0 for lane_id, _ in lane_polygons}
     # Cache buffered polygons for performance optimization
     lane_polygons_buffered = [(lane_id, polygon.buffer(0)) for lane_id, polygon in lane_polygons]
-    
+
+    # S20 SAHI is ON by default — validated to cut daytime abs_err by ~71 %
+    # across 4 cameras (see process-tweaks.md §10-12 and results.md).
+    # Set ATR_USE_SAHI=0 to disable (recommended for nighttime processing,
+    # where the detection-side amplification regresses by ~+8 abs).
+    _use_sahi = os.environ.get("ATR_USE_SAHI", "1").lower() not in ("0", "false", "no")
+    _sahi_region = None  # computed lazily on the first frame so frame dims are known
+
     # Process finish line
     finish_line = LINES_DATA.get("finish_line")
     if finish_line and isinstance(finish_line[0], dict):
@@ -1069,7 +1077,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     break
 
                 # YOLO detection
-                results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=False, verbose=False, imgsz=1408)
+                if _use_sahi:
+                    if _sahi_region is None:
+                        _sahi_region = derive_lane_region(
+                            lane_polygons_buffered, frame.shape[1], frame.shape[0],
+                        )
+                    results = sliced_predict(
+                        model, frame, conf_thresh=CONF_THRESHOLD,
+                        lane_aware_only=_sahi_region,
+                    )
+                else:
+                    results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=False, verbose=False, imgsz=1408)
                 results = _filter_predictions(results, model.names)
                 boxes = results[0].boxes
 
@@ -1467,7 +1485,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 break
 
             # YOLO detection
-            results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=False, verbose=False, imgsz=1408)
+            if _use_sahi:
+                if _sahi_region is None:
+                    _sahi_region = derive_lane_region(
+                        lane_polygons_buffered, frame.shape[1], frame.shape[0],
+                    )
+                results = sliced_predict(
+                    model, frame, conf_thresh=CONF_THRESHOLD,
+                    lane_aware_only=_sahi_region,
+                )
+            else:
+                results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=False, verbose=False, imgsz=1408)
             results = _filter_predictions(results, model.names)
             boxes = results[0].boxes
 
