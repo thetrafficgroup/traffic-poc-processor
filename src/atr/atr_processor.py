@@ -16,24 +16,59 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
 
 # === Centroid Tracker ===
+def _iou_matrix(track_bboxes, det_bboxes):
+    """NxM IoU matrix between track bboxes (N) and detection bboxes (M).
+    bbox format: (x1,y1,x2,y2)."""
+    A = np.array(track_bboxes, dtype=np.float32)
+    B = np.array(det_bboxes, dtype=np.float32)
+    ix1 = np.maximum(A[:, None, 0], B[None, :, 0])
+    iy1 = np.maximum(A[:, None, 1], B[None, :, 1])
+    ix2 = np.minimum(A[:, None, 2], B[None, :, 2])
+    iy2 = np.minimum(A[:, None, 3], B[None, :, 3])
+    iw = np.maximum(0.0, ix2 - ix1)
+    ih = np.maximum(0.0, iy2 - iy1)
+    inter = iw * ih
+    area_a = (A[:, 2] - A[:, 0]) * (A[:, 3] - A[:, 1])
+    area_b = (B[:, 2] - B[:, 0]) * (B[:, 3] - B[:, 1])
+    union = area_a[:, None] + area_b[None, :] - inter
+    return np.where(union > 0, inter / union, 0)
+
+
 class CentroidTracker:
-    def __init__(self, max_disappeared=15, max_distance=150):
+    """Hungarian tracker with three matching modes:
+    - 'centroid_dist': original — Euclidean centroid distance, fixed max_distance
+    - 'scale_aware':   centroid distance, but max_dist scales with track bbox
+                       diagonal (large vehicles allowed to move further)
+    - 'iou':           IoU between track bbox and detection bbox; threshold IoU
+                       to reject. Naturally scale-invariant.
+
+    Falls back to centroid_dist when bboxes aren't provided.
+    """
+    def __init__(self, max_disappeared=15, max_distance=150,
+                 match_mode='centroid_dist', iou_threshold=0.15,
+                 scale_dist_factor=0.0):
         self.nextObjectID = 0
-        self.objects = OrderedDict()
+        self.objects = OrderedDict()      # oid -> centroid (cx, cy)
+        self.bboxes = OrderedDict()       # oid -> bbox (x1,y1,x2,y2) | None
         self.disappeared = OrderedDict()
         self.max_disappeared = max_disappeared
         self.max_distance = max_distance
+        self.match_mode = match_mode
+        self.iou_threshold = iou_threshold
+        self.scale_dist_factor = scale_dist_factor
 
-    def register(self, centroid):
+    def register(self, centroid, bbox=None):
         self.objects[self.nextObjectID] = centroid
+        self.bboxes[self.nextObjectID] = bbox
         self.disappeared[self.nextObjectID] = 0
         self.nextObjectID += 1
 
     def deregister(self, objectID):
         del self.objects[objectID]
+        self.bboxes.pop(objectID, None)
         del self.disappeared[objectID]
 
-    def update(self, input_centroids):
+    def update(self, input_centroids, input_bboxes=None):
         if len(input_centroids) == 0:
             for objectID in list(self.disappeared.keys()):
                 self.disappeared[objectID] += 1
@@ -42,36 +77,83 @@ class CentroidTracker:
             return self.objects
 
         if len(self.objects) == 0:
-            for centroid in input_centroids:
-                self.register(centroid)
-        else:
-            from scipy.optimize import linear_sum_assignment
-            objectIDs = list(self.objects.keys())
-            objectCentroids = list(self.objects.values())
-            D = np.linalg.norm(np.array(objectCentroids)[:, np.newaxis] - input_centroids, axis=2)
-            row_ind, col_ind = linear_sum_assignment(D)
-            used_rows = set()
-            used_cols = set()
+            for i, centroid in enumerate(input_centroids):
+                bb = input_bboxes[i] if input_bboxes is not None else None
+                self.register(centroid, bb)
+            return self.objects
+
+        from scipy.optimize import linear_sum_assignment
+        objectIDs = list(self.objects.keys())
+        objectCentroids = list(self.objects.values())
+        objectBboxes = [self.bboxes.get(oid) for oid in objectIDs]
+
+        n_tracks = len(objectIDs)
+        n_dets = len(input_centroids)
+
+        use_iou = (self.match_mode == 'iou'
+                   and input_bboxes is not None
+                   and all(bb is not None for bb in objectBboxes))
+
+        used_rows, used_cols = set(), set()
+
+        if use_iou:
+            iou_mat = _iou_matrix(objectBboxes, input_bboxes)
+            cost = 1.0 - iou_mat
+            row_ind, col_ind = linear_sum_assignment(cost)
             for r, c in zip(row_ind, col_ind):
-                if D[r, c] > self.max_distance:
+                if iou_mat[r, c] < self.iou_threshold:
                     continue
-                objectID = objectIDs[r]
-                self.objects[objectID] = input_centroids[c]
-                self.disappeared[objectID] = 0
-                used_rows.add(r)
-                used_cols.add(c)
+                oid = objectIDs[r]
+                self.objects[oid] = input_centroids[c]
+                self.bboxes[oid] = input_bboxes[c]
+                self.disappeared[oid] = 0
+                used_rows.add(r); used_cols.add(c)
+        else:
+            D = np.linalg.norm(np.array(objectCentroids)[:, np.newaxis] - input_centroids, axis=2)
+            # Stale-centroid penalty: a track that hasn't been matched for N
+            # frames competes for new detections with the cost (distance + N*P).
+            # Without this, a track that lost its detection 10 frames ago and
+            # whose stale centroid is coincidentally close to a new detection
+            # can win the Hungarian assignment over a freshly-matched
+            # neighboring track (e.g. multi_3 fr 488: stale oid 181 vs fresh
+            # oid 186 — the 2-px tiebreaker made 181 hijack the detection,
+            # leaving 186 to die and 181 to count the same vehicle a second
+            # time as it crossed the finish line).
+            disappeared_arr = np.array(
+                [self.disappeared.get(oid, 0) for oid in objectIDs],
+                dtype=np.float32,
+            )
+            D = D + disappeared_arr[:, np.newaxis] * 5.0
+            row_ind, col_ind = linear_sum_assignment(D)
+            for r, c in zip(row_ind, col_ind):
+                # Per-row max_dist: optionally scaled by track bbox diagonal
+                thresh = self.max_distance
+                if (self.scale_dist_factor > 0
+                        and objectBboxes[r] is not None):
+                    bb = objectBboxes[r]
+                    diag = ((bb[2]-bb[0])**2 + (bb[3]-bb[1])**2) ** 0.5
+                    thresh = max(self.max_distance, diag * self.scale_dist_factor)
+                if D[r, c] > thresh:
+                    continue
+                oid = objectIDs[r]
+                self.objects[oid] = input_centroids[c]
+                if input_bboxes is not None:
+                    self.bboxes[oid] = input_bboxes[c]
+                self.disappeared[oid] = 0
+                used_rows.add(r); used_cols.add(c)
 
-            unused_rows = set(range(0, D.shape[0])).difference(used_rows)
-            unused_cols = set(range(0, D.shape[1])).difference(used_cols)
+        unused_rows = set(range(n_tracks)).difference(used_rows)
+        unused_cols = set(range(n_dets)).difference(used_cols)
 
-            for row in unused_rows:
-                objectID = objectIDs[row]
-                self.disappeared[objectID] += 1
-                if self.disappeared[objectID] > self.max_disappeared:
-                    self.deregister(objectID)
+        for row in unused_rows:
+            oid = objectIDs[row]
+            self.disappeared[oid] += 1
+            if self.disappeared[oid] > self.max_disappeared:
+                self.deregister(oid)
 
-            for col in unused_cols:
-                self.register(input_centroids[col])
+        for col in unused_cols:
+            bb = input_bboxes[col] if input_bboxes is not None else None
+            self.register(input_centroids[col], bb)
 
         return self.objects
 
@@ -79,10 +161,60 @@ def get_centroid(box):
     x1, y1, x2, y2 = box
     return int((x1 + x2) / 2), int((y1 + y2) / 2)
 
-def get_wheels_position(box):
-    """Get the wheel position (bottom center) of the bounding box"""
+_ZENITH_VP = None  # set per-call by _set_zenith_vp_from_lines_data() before processing
+
+
+def _set_zenith_vp_from_lines_data(lines_data):
+    """Read zenith_vp from the per-video lines_data dict (the same payload
+    that carries lane polygons + finish_line). Shape: {"zenith_vp": {"x": .., "y": ..}}.
+
+    Absent or malformed → correction disabled (legacy bbox-bottom-center anchor)."""
+    global _ZENITH_VP
+    _ZENITH_VP = None
+    if not isinstance(lines_data, dict):
+        return
+    vp = lines_data.get("zenith_vp")
+    if isinstance(vp, dict) and "x" in vp and "y" in vp:
+        try:
+            _ZENITH_VP = (float(vp["x"]), float(vp["y"]))
+            print(f"📐 zenith VP correction ENABLED at vp=({_ZENITH_VP[0]:.1f}, {_ZENITH_VP[1]:.1f})")
+        except Exception:
+            _ZENITH_VP = None
+
+
+def _wheels_anchor_zenith(box, vp):
+    """Corrected wheel anchor via the line from zenith VP through bbox-top-center,
+    extended to bbox-bottom y. Falls back to naive bbox-bottom-center if degenerate
+    (top-y == vp-y, i.e. bbox at the zenith horizon)."""
     x1, y1, x2, y2 = box
-    # Wheels are at the bottom center of the vehicle
+    top_cx, top_cy = (x1 + x2) / 2.0, y1
+    vp_x, vp_y = vp
+    dy = top_cy - vp_y
+    if abs(dy) < 1e-6:
+        return int(top_cx), int(y2)
+    t = (y2 - vp_y) / dy
+    return int(vp_x + (top_cx - vp_x) * t), int(y2)
+
+
+def get_wheels_position(box):
+    """Get the wheel-anchor point of the bounding box.
+
+    When zenith_vp was provided in lines_data, applies the zenith-VP
+    geometric correction that isolates the world-vertical axis of the
+    vehicle (so tall vehicles don't get assigned to an outboard lane
+    due to the perspective lean of the bbox top corners). Otherwise
+    falls back to bbox bottom-center.
+
+    See zenith_vp_demo.html for the geometric intuition."""
+    if _ZENITH_VP is not None:
+        return _wheels_anchor_zenith(box, _ZENITH_VP)
+    x1, y1, x2, y2 = box
+    return int((x1 + x2) / 2), int(y2)
+
+
+def get_wheels_position_naive(box):
+    """Always-naive bbox bottom-center. Used by debug overlay for A/B visuals."""
+    x1, y1, x2, y2 = box
     return int((x1 + x2) / 2), int(y2)
 
 def find_vehicle_lane(cx, cy, wx, wy, lane_polygons_buffered, bbox=None):
@@ -670,8 +802,21 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             print("⚠️ Falling back to processing entire video")
             trim_periods = None
 
-    # Constants
-    CONF_THRESHOLD = 0.03
+    # Constants. These values were chosen against the multi_3 / multi_4 GT in
+    # May 2026 — see geometry/ debugging notes. They displace the original
+    # SAHI-based stack (which produced 3-5 bboxes per vehicle and inflated
+    # counts via duplicates that the dedup layer only partly caught).
+    CONF_THRESHOLD = 0.10                 # was 0.03; lower threshold added noise
+                                          # detections that fragmented tracks
+    AGNOSTIC_NMS = True                   # cross-class NMS merges same vehicle
+                                          # classified as car + pickup + work_van
+    DEDUP_BBOX_OVERLAP_THRESH = 0.7       # was 0.5; with cleaner input, the
+                                          # aggressive dedup was suppressing
+                                          # legitimate counts at 50% overlap
+
+    # Apply per-video zenith VP from lines_data (set on the module-level cache
+    # consumed by get_wheels_position).
+    _set_zenith_vp_from_lines_data(LINES_DATA)
 
     # Per-class post-prediction filter — drops false-positive truck/bus/motorcycle
     # detections that the wide CONF_THRESHOLD lets through. Cars/pickups are
@@ -732,12 +877,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Cache buffered polygons for performance optimization
     lane_polygons_buffered = [(lane_id, polygon.buffer(0)) for lane_id, polygon in lane_polygons]
 
-    # S20 SAHI is ON by default — validated to cut daytime abs_err by ~71 %
-    # across 4 cameras (see process-tweaks.md §10-12 and results.md).
-    # Set ATR_USE_SAHI=0 to disable (recommended for nighttime processing,
-    # where the detection-side amplification regresses by ~+8 abs).
-    _use_sahi = os.environ.get("ATR_USE_SAHI", "1").lower() not in ("0", "false", "no")
-    _sahi_region = None  # computed lazily on the first frame so frame dims are known
+    # SAHI is OFF: the tile + full-frame fan-out produced 3-5 duplicate
+    # bboxes per vehicle in dense traffic (different tile crops returning
+    # the same vehicle), which the agnostic NMS at iou=0.3 couldn't always
+    # merge. Fragmented tracks downstream caused ID-jitter and undercounts.
+    # See geometry/window_debug/ for the comparison frames.
+    _use_sahi = False
+    _sahi_region = None
 
     # Process finish line
     finish_line = LINES_DATA.get("finish_line")
@@ -751,7 +897,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     last_known_lane = {}
     recently_counted_bboxes = []  # [(bbox_tuple, frame_count)] for overlap dedup
     recently_counted_positions = []  # [(lane_id, cx, cy, frame_count)] for position dedup
-    tracker = CentroidTracker(max_disappeared=15)
+    tracker = CentroidTracker(
+        max_disappeared=15,
+        max_distance=30,          # was 150; tight to prevent hijacking of
+                                  # already-counted tracks by nearby new vehicles
+        scale_dist_factor=0.5,    # max_dist_per_track = max(30, bbox_diag * 0.5)
+                                  # so big foreground vehicles can move further
+                                  # without losing their track ID
+    )
 
     # Overcount-diagnosis emitter — gated on ATR_COUNT_DEBUG=1.
     debug_emitter = _ATRDebugEmitter(video_uuid, fps, finish_linestring)
@@ -764,14 +917,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         truck_classifier_model_path=truck_classifier_model_path,
         axle_detector_model_path=axle_detector_model_path,
         conf_threshold=CONF_THRESHOLD,
-        agnostic_nms=False,
-        iou_threshold_default_ultralytics=0.7,
+        agnostic_nms=AGNOSTIC_NMS,
+        iou_threshold_default_ultralytics=0.5,
         imgsz=1408,
         lane_polygon_buffer_px=0,
-        tracker={"max_disappeared": 15, "max_distance": 150},
+        tracker={"max_disappeared": tracker.max_disappeared,
+                 "max_distance": tracker.max_distance,
+                 "match_mode": tracker.match_mode,
+                 "scale_dist_factor": tracker.scale_dist_factor},
         dedup={
             "bbox_window_seconds": 1.0,
-            "bbox_overlap_min_area_ratio": 0.5,
+            "bbox_overlap_min_area_ratio": DEDUP_BBOX_OVERLAP_THRESH,
             "position_window_seconds": 0.5,
             "position_distance_rule": "max(30, bbox_height*0.25)",
         },
@@ -949,7 +1105,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         """Reset CentroidTracker to start fresh tracking for new period"""
         nonlocal tracker
         next_id = tracker.nextObjectID
-        tracker = CentroidTracker(max_disappeared=15)
+        tracker = CentroidTracker(
+        max_disappeared=15,
+        max_distance=30,          # was 150; tight to prevent hijacking of
+                                  # already-counted tracks by nearby new vehicles
+        scale_dist_factor=0.5,    # max_dist_per_track = max(30, bbox_diag * 0.5)
+                                  # so big foreground vehicles can move further
+                                  # without losing their track ID
+    )
         tracker.nextObjectID = next_id
         print(f"🔄 ATR CentroidTracker reset (nextObjectID={next_id}) - previous tracking state cleared")
 
@@ -1085,13 +1248,15 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     results = sliced_predict(
                         model, frame, conf_thresh=CONF_THRESHOLD,
                         lane_aware_only=_sahi_region,
+                        nms_iou=0.3,
                     )
                 else:
-                    results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=False, verbose=False, imgsz=1408)
+                    results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=AGNOSTIC_NMS, iou=0.5, verbose=False, imgsz=1408)
                 results = _filter_predictions(results, model.names)
                 boxes = results[0].boxes
 
                 input_centroids = []
+                input_bboxes = []
                 detections_map = {}
 
                 # Only process if there are detections
@@ -1104,11 +1269,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         cx, cy = get_centroid((x1, y1, x2, y2))
                         wx, wy = get_wheels_position((x1, y1, x2, y2))
                         input_centroids.append(np.array([cx, cy]))
+                        input_bboxes.append((float(x1), float(y1), float(x2), float(y2)))
                         detections_map[(cx, cy)] = (x1, y1, x2, y2, class_name, wx, wy, conf)
                         debug_total_detections += 1
 
                 # Update tracker
-                objects = tracker.update(np.array(input_centroids))
+                objects = tracker.update(np.array(input_centroids), input_bboxes if input_bboxes else None)
 
                 # Diagnostic-frame trigger for D1/D2 emission
                 is_diag_frame = debug_emitter.is_diagnostic_frame(detections_map, objects)
@@ -1288,7 +1454,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                     if current_poly.intersects(counted_poly):
                                         overlap = current_poly.intersection(counted_poly).area
                                         min_area = min(current_area, counted_poly.area)
-                                        if min_area > 0 and overlap / min_area > 0.5:
+                                        if min_area > 0 and overlap / min_area > DEDUP_BBOX_OVERLAP_THRESH:
                                             dedup_dominated = True
                                             dedup_layer = "bbox_overlap"
                                             break
@@ -1422,10 +1588,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                     class_name_viz = f"{class_name_viz}_fhwa{fhwa_viz}"
                             cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
-                            # Draw wheels position if available (for debugging)
+                            # Wheel-anchor overlay: red = naive bbox-bottom-center,
+                            # cyan = zenith-VP-corrected (only differs when ATR_ZENITH_VP set).
                             if len(detection_data) > 6:
-                                wx, wy = detection_data[5], detection_data[6]
-                                cv2.circle(frame, (int(wx), int(wy)), 3, (255, 0, 0), -1)  # Blue for wheels
+                                wx, wy = detection_data[5], detection_data[6]  # used for lane assignment
+                                nx, ny = get_wheels_position_naive((x1, y1, x2, y2))
+                                if (nx, ny) != (wx, wy):
+                                    cv2.line(frame, (int(nx), int(ny)), (int(wx), int(wy)), (180, 180, 180), 1)
+                                    cv2.circle(frame, (int(nx), int(ny)), 4, (0, 0, 255), -1)  # red: naive
+                                    cv2.circle(frame, (int(wx), int(wy)), 4, (255, 220, 0), -1)  # cyan: corrected
+                                else:
+                                    cv2.circle(frame, (int(wx), int(wy)), 3, (255, 0, 0), -1)  # blue: only naive (vp off)
 
                             label = f'ID {objectID} | L{lane_id}'
                             if class_name_viz:
@@ -1447,10 +1620,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                    (pts[0][0][0], pts[0][0][1] - 8),
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-                    # Draw total count
+                    # Draw total count + algo tag (so the two A/B videos are visually distinguishable)
                     total_count_current = sum(lane_counts.values())
                     cv2.putText(frame, f'Total: {total_count_current}', (20, 40),
                                cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 255), 3)
+                    _vp_tag = _ZENITH_VP
+                    _algo_tag = f"zenithVP@({int(_vp_tag[0])},{int(_vp_tag[1])})" if _vp_tag else "baseline"
+                    cv2.putText(frame, _algo_tag, (20, 70),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 220, 0) if _vp_tag else (0, 0, 255), 2)
 
                     # Resize frame if needed for compression
                     if width != orig_width or height != orig_height:
@@ -1493,13 +1670,15 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 results = sliced_predict(
                     model, frame, conf_thresh=CONF_THRESHOLD,
                     lane_aware_only=_sahi_region,
+                    nms_iou=0.3,
                 )
             else:
-                results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=False, verbose=False, imgsz=1408)
+                results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=AGNOSTIC_NMS, iou=0.5, verbose=False, imgsz=1408)
             results = _filter_predictions(results, model.names)
             boxes = results[0].boxes
 
             input_centroids = []
+            input_bboxes = []
             detections_map = {}
 
             # Only process if there are detections
@@ -1512,11 +1691,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     cx, cy = get_centroid((x1, y1, x2, y2))
                     wx, wy = get_wheels_position((x1, y1, x2, y2))
                     input_centroids.append(np.array([cx, cy]))
+                    input_bboxes.append((float(x1), float(y1), float(x2), float(y2)))
                     detections_map[(cx, cy)] = (x1, y1, x2, y2, class_name, wx, wy, conf)
                     debug_total_detections += 1
 
             # Update tracker
-            objects = tracker.update(np.array(input_centroids))
+            objects = tracker.update(np.array(input_centroids), input_bboxes if input_bboxes else None)
 
             # Diagnostic-frame trigger for D1/D2 emission
             is_diag_frame = debug_emitter.is_diagnostic_frame(detections_map, objects)
@@ -1827,10 +2007,16 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 class_name_viz = f"{class_name_viz}_fhwa{fhwa_viz}"
                         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
-                        # Draw wheels position if available (for debugging)
+                        # Wheel-anchor overlay: red = naive, cyan = zenith-VP-corrected.
                         if len(detection_data) > 6:
                             wx, wy = detection_data[5], detection_data[6]
-                            cv2.circle(frame, (int(wx), int(wy)), 3, (255, 0, 0), -1)  # Blue for wheels
+                            nx, ny = get_wheels_position_naive((x1, y1, x2, y2))
+                            if (nx, ny) != (wx, wy):
+                                cv2.line(frame, (int(nx), int(ny)), (int(wx), int(wy)), (180, 180, 180), 1)
+                                cv2.circle(frame, (int(nx), int(ny)), 4, (0, 0, 255), -1)
+                                cv2.circle(frame, (int(wx), int(wy)), 4, (255, 220, 0), -1)
+                            else:
+                                cv2.circle(frame, (int(wx), int(wy)), 3, (255, 0, 0), -1)
 
                         label = f'ID {objectID} | L{lane_id}'
                         if class_name_viz:
@@ -1852,10 +2038,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                (pts[0][0][0], pts[0][0][1] - 8),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
-                # Draw total count
+                # Draw total count + algo tag
                 total_count_current = sum(lane_counts.values())
                 cv2.putText(frame, f'Total: {total_count_current}', (20, 40),
                            cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 255), 3)
+                _vp_tag = _ZENITH_VP
+                _algo_tag = f"zenithVP@({int(_vp_tag[0])},{int(_vp_tag[1])})" if _vp_tag else "baseline"
+                cv2.putText(frame, _algo_tag, (20, 70),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 220, 0) if _vp_tag else (0, 0, 255), 2)
 
                 # Resize frame if needed for compression
                 if width != orig_width or height != orig_height:
