@@ -11,6 +11,7 @@ import os
 # Add parent directory to path to access atr module
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from atr.atr_minute_tracker import ATRMinuteTracker
+from utils.ffmpeg_writer import FFmpegH264Writer
 
 
 def generate_parallel_lines(finish_line, distance=30):
@@ -184,31 +185,23 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         minute_tracker = ATRMinuteTracker(fps, video_uuid, minute_batch_callback, verbose=False)
         print(f"🔄 Low-Rate ATR MinuteTracker enabled for video {video_uuid}")
     
-    # Initialize video writer if requested
+    # Initialize video writer if requested.
+    # opencv-python-headless cannot open an H.264 encoder in this image (its bundled
+    # ffmpeg lacks libx264), so cv2.VideoWriter('H264') silently falls back to the
+    # unplayable MPEG-4 Part 2 (mp4v). We instead encode H.264 directly via the
+    # system ffmpeg CLI (libx264) using FFmpegH264Writer (frames are written at the
+    # source resolution; FFmpegH264Writer resizes to even dims if needed).
     video_writer = None
     if generate_video_output and output_video_path:
-        fps = int(cap.get(cv2.CAP_PROP_FPS))
+        fps = int(cap.get(cv2.CAP_PROP_FPS)) or 15
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        # Try multiple codecs
-        codecs_to_try = ['H264', 'X264', 'XVID', 'mp4v']
-        for codec in codecs_to_try:
-            try:
-                fourcc = cv2.VideoWriter_fourcc(*codec)
-                temp_writer = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
-                if temp_writer.isOpened():
-                    video_writer = temp_writer
-                    print(f"✅ Using video codec: {codec}")
-                    break
-                else:
-                    temp_writer.release()
-            except Exception as e:
-                print(f"⚠️ Codec {codec} failed: {e}")
-                continue
-        
-        if not video_writer:
-            print("❌ Could not initialize video writer with any codec")
+
+        video_writer = FFmpegH264Writer(output_video_path, fps, width, height,
+                                        crf=26, preset="veryfast")
+        if not video_writer.isOpened():
+            print("❌ Could not initialize low-rate ATR H.264 video writer (ffmpeg/libx264 unavailable)")
+            video_writer = None
             generate_video_output = False
     
     def point_in_polygon(x, y, polygon):

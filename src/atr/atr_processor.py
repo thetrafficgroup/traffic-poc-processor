@@ -14,6 +14,7 @@ import gc
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
+from utils.ffmpeg_writer import FFmpegH264Writer
 
 # === Centroid Tracker ===
 def _iou_matrix(track_bboxes, det_bboxes):
@@ -1008,63 +1009,36 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         minute_tracker = ATRMinuteTracker(fps, video_uuid, minute_batch_callback, verbose=False)
         print(f"🔄 ATR MinuteTracker enabled for video {video_uuid}")
     
-    # Initialize video writer if output video is requested
+    # Initialize video writer if output video is requested.
+    # opencv-python-headless cannot open an H.264 encoder in this image (its bundled
+    # ffmpeg lacks libx264), so cv2.VideoWriter('H264') silently falls back to the
+    # unplayable MPEG-4 Part 2 (mp4v). We instead encode H.264 directly via the
+    # system ffmpeg CLI (libx264) using FFmpegH264Writer -> a browser-playable file
+    # with no giant mp4v intermediate and no post-transcode.
     video_writer = None
     if generate_video_output and output_video_path:
-        orig_fps = int(cap.get(cv2.CAP_PROP_FPS))
+        orig_fps = int(cap.get(cv2.CAP_PROP_FPS)) or 15
         orig_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         orig_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        
-        # Aggressive compression settings for ATR processor
-        # Use H.264 with high compression for minimal file size
+
+        # Reduce output resolution if too large, for smaller files.
         width, height = orig_width, orig_height
-        
-        try:
-            fourcc = cv2.VideoWriter_fourcc(*'H264')
-            # Reduce output resolution if too large for better compression
-            if width > 1920 or height > 1080:
-                scale_factor = min(1920/width, 1080/height)
-                width = int(width * scale_factor)
-                height = int(height * scale_factor)
-                print(f"📉 Scaling ATR output resolution to {width}x{height} for compression")
-            
-            # Use lower FPS for additional compression if original is high
-            output_fps = min(orig_fps, 15)  # Cap at 15 FPS for traffic analysis
-            if output_fps != orig_fps:
-                print(f"📉 Reducing ATR output FPS from {orig_fps} to {output_fps} for compression")
-            
-            video_writer = cv2.VideoWriter(output_video_path, fourcc, output_fps, (width, height))
-            
-            if video_writer.isOpened():
-                print(f"✅ ATR video writer initialized: H264 codec, {width}x{height}@{output_fps}fps")
-            else:
-                video_writer.release()
-                video_writer = None
-                
-        except Exception as e:
-            print(f"⚠️ H264 codec failed: {e}")
+        if width > 1920 or height > 1080:
+            scale_factor = min(1920 / width, 1080 / height)
+            width = int(width * scale_factor)
+            height = int(height * scale_factor)
+            print(f"📉 Scaling ATR output resolution to {width}x{height} for compression")
+
+        # Cap FPS for additional compression.
+        output_fps = min(orig_fps, 15)  # Cap at 15 FPS for traffic analysis
+        if output_fps != orig_fps:
+            print(f"📉 Reducing ATR output FPS from {orig_fps} to {output_fps} for compression")
+
+        video_writer = FFmpegH264Writer(output_video_path, output_fps, width, height,
+                                        crf=26, preset="veryfast")
+        if not video_writer.isOpened():
+            print("❌ Could not initialize ATR H.264 video writer (ffmpeg/libx264 unavailable)")
             video_writer = None
-        
-        # Fallback to other codecs if H264 fails
-        if not video_writer:
-            codecs_to_try = ['X264', 'XVID', 'mp4v']
-            
-            for codec in codecs_to_try:
-                try:
-                    fourcc = cv2.VideoWriter_fourcc(*codec)
-                    temp_writer = cv2.VideoWriter(output_video_path, fourcc, orig_fps, (width, height))
-                    if temp_writer.isOpened():
-                        video_writer = temp_writer
-                        print(f"✅ Fallback to ATR video codec: {codec}")
-                        break
-                    else:
-                        temp_writer.release()
-                except Exception as e:
-                    print(f"⚠️ Codec {codec} failed: {e}")
-                    continue
-        
-        if not video_writer:
-            print("❌ Could not initialize ATR video writer with any codec")
             generate_video_output = False
 
     # Helper function to send seeking progress
