@@ -26,12 +26,34 @@ from pedestrian.pedestrian_processor import PedestrianProcessor
 
 CONF_THRESHOLD = 0.15
 IOU_THRESHOLD = 0.2
-DIST_THRESHOLD = 10
 _BASE_TRACKER_CONFIG = os.path.join(os.path.dirname(__file__), "botsort.yaml")
 _TRACK_BUFFER_SECONDS = 5  # How many seconds to keep lost tracks alive
 
 # Classes to exclude from the vehicle model (handled by the pedestrian model instead)
 _VEHICLE_MODEL_EXCLUDE_CLASSES = {"pedestrian", "bicycle", "non-motorized_vehicle"}
+
+# Set per-video by process_video: mean of all counting-line endpoints. Used by the
+# label-independent "center" entry gate.
+_INTERSECTION_CENTER = None
+
+# Counted-entry events (line, cx, cy, frame) for fragment de-dup. Reset per video.
+_ENTRY_EVENTS = []
+
+# Fragment de-dup window: skip a new entry already counted on the SAME line within
+# this many px / frames (the tracker splits one vehicle into several IDs).
+_DEDUP_PX = 60
+_DEDUP_FRAMES = 30
+
+
+def _segments_intersect(p1, p2, q1, q2):
+    """True if segment p1→p2 properly intersects segment q1→q2 (orientation test)."""
+    def orient(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    d1 = orient(q1, q2, p1)
+    d2 = orient(q1, q2, p2)
+    d3 = orient(p1, p2, q1)
+    d4 = orient(p1, p2, q2)
+    return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
 
 
 def _compute_img_size(width: int, height: int, cap: int = 1920) -> int:
@@ -128,42 +150,23 @@ def build_analysis_by_vehicle_class(detected_classes, turn_types_by_id, crossing
     return analysis
 
 def is_entering_from_outside(line_name, prev_pos, curr_pos, line_coords):
+    """Decide whether a line crossing counts as an entry (for the total count).
+
+    Default 'center': the vehicle is moving TOWARD the intersection centre when it
+    crosses — label-independent, so it works no matter how the N/S/E/W lines were
+    drawn. 'any' (TMC_COUNT_MODE=any): count every crossing — best on cameras where
+    the tracker rarely fragments. (Replaces the old per-direction cross-product
+    heuristic, which assumed canonical line orientations and silently dropped ~15%
+    of real vehicles on arbitrarily-drawn lines.)
     """
-    Determina si un vehículo está entrando desde afuera al cruzar una línea.
-    Usa el producto cruzado para determinar de qué lado de la línea viene el vehículo.
-    Retorna True si el vehículo viene desde el lado "exterior" de la intersección.
-    
-    Esta función está optimizada para las coordenadas específicas de este proyecto.
-    """
-    x1, y1 = line_coords["pt1"]
-    x2, y2 = line_coords["pt2"]
-    prev_x, prev_y = prev_pos
-    curr_x, curr_y = curr_pos
-    
-    # Calcular el producto cruzado para determinar el lado de la línea
-    # Si cross_product > 0: punto está a la izquierda de la línea (mirando de pt1 a pt2)
-    # Si cross_product < 0: punto está a la derecha de la línea
-    def cross_product(px, py):
-        return (x2 - x1) * (py - y1) - (y2 - y1) * (px - x1)
-    
-    prev_cross = cross_product(prev_x, prev_y)
-    
-    # Definir qué lado es "exterior" para cada línea según la configuración específica
-    # Esta lógica está basada en las coordenadas reales de las líneas
-    if line_name == "NORTH":
-        # Línea norte: exterior está hacia arriba/izquierda
-        return prev_cross > 0  # Viene del lado izquierdo de la línea
-    elif line_name == "SOUTH": 
-        # Línea sur: exterior está hacia abajo/derecha
-        return prev_cross < 0  # Viene del lado derecho de la línea
-    elif line_name == "EAST":
-        # Línea este: exterior está hacia la derecha
-        return prev_cross < 0  # Viene del lado derecho de la línea
-    elif line_name == "WEST":
-        # Línea oeste: exterior está hacia la izquierda
-        return prev_cross > 0  # Viene del lado izquierdo de la línea
-    
-    return False
+    if os.environ.get("TMC_COUNT_MODE", "center") == "any":
+        return True
+    if _INTERSECTION_CENTER is not None:
+        mx, my = _INTERSECTION_CENTER
+        motion = (curr_pos[0] - prev_pos[0], curr_pos[1] - prev_pos[1])
+        toward = (mx - curr_pos[0], my - curr_pos[1])
+        return (motion[0] * toward[0] + motion[1] * toward[1]) > 0
+    return True
 
 
 def process_single_detection(
@@ -171,7 +174,7 @@ def process_single_detection(
     prev_wheels, prev_centroids, counted_ids_per_line,
     entry_counted_ids, crossed_lines_by_id, crossing_timestamps,
     turn_types_by_id, detected_classes, class_counts_by_id,
-    LINES, DIST_THRESHOLD, point_line_distance, is_entering_fn, classify_turn_fn,
+    LINES, is_entering_fn, classify_turn_fn,
     track_interpolator=None, counts=None,
 ):
     """
@@ -189,8 +192,6 @@ def process_single_detection(
         crossed_lines_by_id, crossing_timestamps: Crossing tracking (mutated)
         turn_types_by_id, detected_classes, class_counts_by_id: Classification state (mutated)
         LINES: List of line dicts with name, pt1, pt2
-        DIST_THRESHOLD: Distance threshold for line crossing
-        point_line_distance: Distance calculation function
         is_entering_fn: Function to check if entering from outside
         classify_turn_fn: Function to classify turn type
         track_interpolator: Optional track interpolator for centroid tracking
@@ -213,32 +214,34 @@ def process_single_detection(
             x1, y1 = line["pt1"]
             x2, y2 = line["pt2"]
 
-            # Use wheels position with centroid fallback for line crossing detection
-            dist = point_line_distance(wx, wy, x1, y1, x2, y2)
-            prev_dist = point_line_distance(
-                prev_wheels_pos[0], prev_wheels_pos[1], x1, y1, x2, y2
+            # True crossing: the movement segment (wheels, with centroid as a second
+            # chance) intersects the counting-line segment. Speed-independent, so
+            # fast vehicles can't step over the line between frames.
+            crossed = (
+                _segments_intersect(prev_wheels_pos, (wx, wy), (x1, y1), (x2, y2))
+                or _segments_intersect(prev_centroid_pos, (cx, cy), (x1, y1), (x2, y2))
             )
-
-            # If wheels are too far from line, fallback to centroid
-            if dist > DIST_THRESHOLD * 2:
-                dist = point_line_distance(cx, cy, x1, y1, x2, y2)
-            if prev_dist > DIST_THRESHOLD * 2:
-                prev_dist = point_line_distance(
-                    prev_centroid_pos[0], prev_centroid_pos[1], x1, y1, x2, y2
-                )
-
-            crossed = dist < DIST_THRESHOLD and prev_dist > DIST_THRESHOLD
 
             if crossed and obj_id not in counted_ids_per_line[name]:
                 counted_ids_per_line[name].add(obj_id)
                 if counts is not None:
                     counts[name] = counts.get(name, 0) + 1
 
-                # Check if entering from outside
+                # Entry (with fragment de-dup): the tracker splits one vehicle into
+                # several IDs, so the same physical vehicle can cross a line multiple
+                # times as different IDs. Skip a new entry already counted on the SAME
+                # line, near the SAME spot, within a short window.
                 if obj_id not in entry_counted_ids and is_entering_fn(name, prev_centroid_pos, (cx, cy), line):
-                    entry_counted_ids.add(obj_id)
-                    if obj_id not in detected_classes:
-                        detected_classes[obj_id] = class_name
+                    _dup = any(
+                        _ln == name and abs(current_frame - _ff) <= _DEDUP_FRAMES
+                        and (cx - _fx) ** 2 + (cy - _fy) ** 2 <= _DEDUP_PX * _DEDUP_PX
+                        for (_ln, _fx, _fy, _ff) in _ENTRY_EVENTS
+                    )
+                    if not _dup:
+                        entry_counted_ids.add(obj_id)
+                        _ENTRY_EVENTS.append((name, cx, cy, current_frame))
+                        if obj_id not in detected_classes:
+                            detected_classes[obj_id] = class_name
 
                 # Register crossing with timestamp
                 if obj_id not in crossed_lines_by_id:
@@ -290,6 +293,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             print(f"⚠️ Invalid trim_periods: {error_msg}")
             print("⚠️ Falling back to processing entire video")
             trim_periods = None
+
+    # Per-track class is finalized from a cumulative confidence-weighted vote over the
+    # track's WHOLE life (see the vote in the detection loop + finalization near the
+    # end), so early far-away/blurry misreads get corrected by later, closer views.
+    class_vote_scores = {}    # obj_id -> {class_name: cumulative conf}
+    artic_subtype_by_id = {}  # obj_id -> truck-classifier verdict (cached once)
 
     # Initialize video capture
     cap = cv2.VideoCapture(VIDEO_PATH)
@@ -349,6 +358,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         pt2 = ensure_int_coords(data["pt2"])
         LINES.append({"name": name.upper(), "pt1": pt1, "pt2": pt2})
 
+    # Intersection center = mean of all line endpoints. Used by the label-independent
+    # "center" entry gate (TMC_COUNT_MODE=center): a crossing counts as an entry when
+    # the vehicle is moving toward this center, regardless of how lines are labeled.
+    global _INTERSECTION_CENTER, _ENTRY_EVENTS
+    _ENTRY_EVENTS = []
+    _pts = [p for ln in LINES for p in (ln["pt1"], ln["pt2"])]
+    _INTERSECTION_CENTER = (
+        sum(p[0] for p in _pts) / len(_pts),
+        sum(p[1] for p in _pts) / len(_pts),
+    ) if _pts else None
+
     counts = {line["name"]: 0 for line in LINES}
     counted_ids_per_line = {line["name"]: set() for line in LINES}
     entry_counted_ids = set()  # IDs que entraron desde afuera (para conteo total)
@@ -391,30 +411,6 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         x1, y1, x2, y2 = box
         # Wheels are at the bottom center of the vehicle
         return int((x1 + x2) / 2), int(y2)
-
-    def point_line_distance(px, py, x1, y1, x2, y2):
-        # Ensure all coordinates are float for precise calculations
-        px, py = float(px), float(py)
-        x1, y1, x2, y2 = float(x1), float(y1), float(x2), float(y2)
-        
-        A = px - x1
-        B = py - y1
-        C = x2 - x1
-        D = y2 - y1
-        dot = A * C + B * D
-        len_sq = C * C + D * D
-        param = dot / len_sq if len_sq != 0 else -1
-        if param < 0:
-            xx, yy = x1, y1
-        elif param > 1:
-            xx, yy = x2, y2
-        else:
-            xx = x1 + param * C
-            yy = y1 + param * D
-        dx = px - xx
-        dy = py - yy
-        return (dx**2 + dy**2) ** 0.5
-    
 
     def classify_turn_from_lines(crossing_data):
         if len(crossing_data) < 2:
@@ -738,6 +734,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         boxes = processed_boxes
                         ids = processed_ids if processed_ids is not None else ids
                         classes = processed_classes
+                        scores = processed_scores
                     else:
                         # Skip overlap detection for low-traffic frames or non-sampled frames
                         # Use original detections to avoid unnecessary O(n²) operations
@@ -752,9 +749,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         raw_class_name = model.names[class_id]
                         if raw_class_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                             continue
-                        if raw_class_name == "articulated_truck" and truck_classifier and obj_id not in class_counts_by_id:
-                            raw_class_name = truck_classifier.classify(frame, box)
-                        class_name = class_counts_by_id.get(obj_id, raw_class_name)
+                        # Confidence-weighted class vote over the track's whole life;
+                        # the truck sub-classifier runs once per articulated track.
+                        if raw_class_name == "articulated_truck" and truck_classifier:
+                            if obj_id not in artic_subtype_by_id:
+                                artic_subtype_by_id[obj_id] = truck_classifier.classify(frame, box)
+                            raw_class_name = artic_subtype_by_id[obj_id]
+                        _vs = class_vote_scores.setdefault(obj_id, {})
+                        _conf = float(scores[i]) if i < len(scores) else 0.3
+                        _vs[raw_class_name] = _vs.get(raw_class_name, 0.0) + _conf
+                        class_name = max(_vs, key=_vs.get)
+                        class_counts_by_id[obj_id] = class_name
                         if class_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                             continue
                         cx, cy = get_centroid(box)
@@ -775,8 +780,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                             prev_wheels, prev_centroids, counted_ids_per_line,
                             entry_counted_ids, crossed_lines_by_id, crossing_timestamps,
                             turn_types_by_id, detected_classes, class_counts_by_id,
-                            LINES, DIST_THRESHOLD, point_line_distance,
-                            is_entering_from_outside, classify_turn_from_lines,
+                            LINES, is_entering_from_outside, classify_turn_from_lines,
                             track_interpolator, counts=counts,
                         )
 
@@ -790,8 +794,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                             prev_wheels, prev_centroids, counted_ids_per_line,
                             entry_counted_ids, crossed_lines_by_id, crossing_timestamps,
                             turn_types_by_id, detected_classes, class_counts_by_id,
-                            LINES, DIST_THRESHOLD, point_line_distance,
-                            is_entering_from_outside, classify_turn_from_lines,
+                            LINES, is_entering_from_outside, classify_turn_from_lines,
                             counts=counts,
                         )
 
@@ -965,6 +968,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     boxes = processed_boxes
                     ids = processed_ids if processed_ids is not None else ids
                     classes = processed_classes
+                    scores = processed_scores
                 else:
                     # Skip overlap detection for low-traffic frames or non-sampled frames
                     # Use original detections to avoid unnecessary O(n²) operations
@@ -979,9 +983,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     raw_class_name = model.names[class_id]
                     if raw_class_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                         continue
-                    if raw_class_name == "articulated_truck" and truck_classifier and obj_id not in class_counts_by_id:
-                        raw_class_name = truck_classifier.classify(frame, box)
-                    class_name = class_counts_by_id.get(obj_id, raw_class_name)
+                    # Confidence-weighted class vote over the track's whole life;
+                    # the truck sub-classifier runs once per articulated track.
+                    if raw_class_name == "articulated_truck" and truck_classifier:
+                        if obj_id not in artic_subtype_by_id:
+                            artic_subtype_by_id[obj_id] = truck_classifier.classify(frame, box)
+                        raw_class_name = artic_subtype_by_id[obj_id]
+                    _vs = class_vote_scores.setdefault(obj_id, {})
+                    _conf = float(scores[i]) if i < len(scores) else 0.3
+                    _vs[raw_class_name] = _vs.get(raw_class_name, 0.0) + _conf
+                    class_name = max(_vs, key=_vs.get)
+                    class_counts_by_id[obj_id] = class_name
                     if class_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                         continue
                     cx, cy = get_centroid(box)
@@ -1002,8 +1014,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         prev_wheels, prev_centroids, counted_ids_per_line,
                         entry_counted_ids, crossed_lines_by_id, crossing_timestamps,
                         turn_types_by_id, detected_classes, class_counts_by_id,
-                        LINES, DIST_THRESHOLD, point_line_distance,
-                        is_entering_from_outside, classify_turn_from_lines,
+                        LINES, is_entering_from_outside, classify_turn_from_lines,
                         track_interpolator, counts=counts,
                     )
 
@@ -1017,8 +1028,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         prev_wheels, prev_centroids, counted_ids_per_line,
                         entry_counted_ids, crossed_lines_by_id, crossing_timestamps,
                         turn_types_by_id, detected_classes, class_counts_by_id,
-                        LINES, DIST_THRESHOLD, point_line_distance,
-                        is_entering_from_outside, classify_turn_from_lines,
+                        LINES, is_entering_from_outside, classify_turn_from_lines,
                         counts=counts,
                     )
 
@@ -1184,6 +1194,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # Post procesamiento con lógica corregida
     # Usar entry_counted_ids para el conteo total (solo vehículos que entraron desde afuera)
     total_count = len(entry_counted_ids)
+
+    # Class vote finalization: replace the entry-time label with the track-life
+    # confidence-weighted winner (must run BEFORE the FHWA refinement below,
+    # which reads the base class names).
+    for _oid in list(detected_classes.keys()):
+        _vs = class_vote_scores.get(_oid)
+        if _vs:
+            detected_classes[_oid] = max(_vs, key=_vs.get)
 
     # Refine detected_classes with FHWA-specific labels for trucks when axle data is available
     # Also collect axle detection statistics for analysis
