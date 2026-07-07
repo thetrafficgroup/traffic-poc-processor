@@ -152,14 +152,16 @@ def build_analysis_by_vehicle_class(detected_classes, turn_types_by_id, crossing
 def is_entering_from_outside(line_name, prev_pos, curr_pos, line_coords):
     """Decide whether a line crossing counts as an entry (for the total count).
 
-    Default 'center': the vehicle is moving TOWARD the intersection centre when it
-    crosses — label-independent, so it works no matter how the N/S/E/W lines were
-    drawn. 'any' (TMC_COUNT_MODE=any): count every crossing — best on cameras where
-    the tracker rarely fragments. (Replaces the old per-direction cross-product
-    heuristic, which assumed canonical line orientations and silently dropped ~15%
-    of real vehicles on arbitrarily-drawn lines.)
+    Default 'any': count every crossing. Measured best on the customer cameras on
+    BOTH totals (95.1% vs center 85.1%) and approach×turn movements (err 128 vs 204,
+    8 intersections vs manual counts). 'center' (TMC_COUNT_MODE=center): only count
+    crossings moving TOWARD the intersection centre — use on cameras where heavy
+    tracker fragmentation makes 'any' overcount; it over-filters otherwise (worst on
+    3-leg intersections, whose missing leg skews the centre point). (Both replace the
+    old per-direction cross-product heuristic, which assumed canonical line
+    orientations and silently dropped ~15% of real vehicles.)
     """
-    if os.environ.get("TMC_COUNT_MODE", "center") == "any":
+    if os.environ.get("TMC_COUNT_MODE", "any") != "center":
         return True
     if _INTERSECTION_CENTER is not None:
         mx, my = _INTERSECTION_CENTER
