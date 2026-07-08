@@ -44,6 +44,16 @@ _ENTRY_EVENTS = []
 _DEDUP_PX = 60
 _DEDUP_FRAMES = 30
 
+# Minimum net displacement (px) a track must have travelled since it was first seen
+# before a line crossing may count as an entry. Static false detections (e.g. a road
+# feature detected as a "bus" near a line) jitter in place, respawn under new track
+# IDs, and each fragment can otherwise pass the entry gate — one phantom was counted
+# 83 times in an hour. Real vehicles translate hundreds of px before crossing, so
+# this does not affect them. Overridable via TMC_MIN_DISPLACEMENT_PX (0 disables);
+# reset per video / trim period alongside the other counting state.
+_MIN_DISPLACEMENT_PX = 40
+_FIRST_POS = {}  # obj_id -> (cx, cy) at first sighting
+
 
 def _segments_intersect(p1, p2, q1, q2):
     """True if segment p1→p2 properly intersects segment q1→q2 (orientation test)."""
@@ -202,6 +212,10 @@ def process_single_detection(
     if obj_id not in class_counts_by_id:
         class_counts_by_id[obj_id] = class_name
 
+    # Record where this track was first seen (for the static-phantom entry guard)
+    if obj_id not in _FIRST_POS:
+        _FIRST_POS[obj_id] = (cx, cy)
+
     # Update track interpolator if available
     if track_interpolator is not None:
         track_interpolator.update_track(obj_id, (cx, cy), current_frame)
@@ -229,11 +243,21 @@ def process_single_detection(
                 if counts is not None:
                     counts[name] = counts.get(name, 0) + 1
 
+                # Static-phantom guard: only tracks that have actually travelled since
+                # first sighting may be counted. Stationary false detections jitter in
+                # place with near-zero net displacement.
+                _f = _FIRST_POS.get(obj_id, (cx, cy))
+                _moved = (
+                    _MIN_DISPLACEMENT_PX <= 0
+                    or (cx - _f[0]) ** 2 + (cy - _f[1]) ** 2
+                    >= _MIN_DISPLACEMENT_PX * _MIN_DISPLACEMENT_PX
+                )
+
                 # Entry (with fragment de-dup): the tracker splits one vehicle into
                 # several IDs, so the same physical vehicle can cross a line multiple
                 # times as different IDs. Skip a new entry already counted on the SAME
                 # line, near the SAME spot, within a short window.
-                if obj_id not in entry_counted_ids and is_entering_fn(name, prev_centroid_pos, (cx, cy), line):
+                if obj_id not in entry_counted_ids and _moved and is_entering_fn(name, prev_centroid_pos, (cx, cy), line):
                     _dup = any(
                         _ln == name and abs(current_frame - _ff) <= _DEDUP_FRAMES
                         and (cx - _fx) ** 2 + (cy - _fy) ** 2 <= _DEDUP_PX * _DEDUP_PX
@@ -363,8 +387,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # Intersection center = mean of all line endpoints. Used by the label-independent
     # "center" entry gate (TMC_COUNT_MODE=center): a crossing counts as an entry when
     # the vehicle is moving toward this center, regardless of how lines are labeled.
-    global _INTERSECTION_CENTER, _ENTRY_EVENTS
+    global _INTERSECTION_CENTER, _ENTRY_EVENTS, _MIN_DISPLACEMENT_PX, _FIRST_POS
     _ENTRY_EVENTS = []
+    _FIRST_POS = {}
+    _MIN_DISPLACEMENT_PX = float(os.environ.get("TMC_MIN_DISPLACEMENT_PX", "40"))
     _pts = [p for ln in LINES for p in (ln["pt1"], ln["pt2"])]
     _INTERSECTION_CENTER = (
         sum(p[0] for p in _pts) / len(_pts),
@@ -674,6 +700,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             # Clear previous positions to prevent cross-period tracking
             prev_centroids.clear()
             prev_wheels.clear()
+            _FIRST_POS.clear()  # tracker IDs restart per period; drop stale origins
             print("🧹 Previous positions cleared for new period")
 
             # Skip frames until we reach the start of this period (frame-skipping)
