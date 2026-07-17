@@ -198,17 +198,22 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
             has_audio = 'audio' in probe_result.stdout
             print(f"📊 Video has audio: {has_audio}")
 
+            # The processor now writes browser-playable H.264 (+faststart) directly.
+            # When it does, stream-copy (remux) instead of a wasteful full re-encode;
+            # only legacy non-H.264 output is actually transcoded.
+            vcodec = subprocess.run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                                     '-show_entries', 'stream=codec_name', '-of', 'csv=p=0',
+                                     output_video_path], capture_output=True, text=True, timeout=30).stdout.strip()
+            if vcodec == 'h264':
+                print("✅ Output already H.264 — stream-copying instead of re-encoding")
+                video_args = ['-c:v', 'copy']
+            else:
+                video_args = ['-c:v', 'libx264', '-preset', 'fast', '-crf', '26',
+                              '-profile:v', 'baseline', '-level', '3.1', '-pix_fmt', 'yuv420p',
+                              '-tune', 'stillimage']
+
             # Build compression command - handle videos with or without audio
-            compression_cmd = [
-                'ffmpeg', '-i', output_video_path,
-                # Video compression
-                '-c:v', 'libx264',
-                '-preset', 'fast',  # Good balance of speed and compression (3x faster than veryslow)
-                '-crf', '26',  # Good compression with slightly better quality than 28
-                '-profile:v', 'baseline',
-                '-level', '3.1',
-                '-pix_fmt', 'yuv420p',
-            ]
+            compression_cmd = ['ffmpeg', '-i', output_video_path] + video_args
 
             # Only add audio encoding if the source has audio
             if has_audio:
@@ -223,7 +228,6 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
             # Add optimization flags
             compression_cmd.extend([
                 '-movflags', '+faststart',
-                '-tune', 'stillimage',  # Optimize for traffic footage
                 '-y', compressed_path
             ])
 
