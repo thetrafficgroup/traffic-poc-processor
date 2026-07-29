@@ -15,6 +15,7 @@ import gc
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
 from utils.ffmpeg_writer import FFmpegH264Writer
+from utils.background_model import BackgroundProvider, model_wants_background
 
 # === Centroid Tracker ===
 def _iou_matrix(track_bboxes, det_bboxes):
@@ -1002,6 +1003,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         model = YOLO(MODEL_PATH)
         print(f"⚠️ Rear-view model not found, falling back to general model: {MODEL_PATH}")
 
+    # Background-conditioned (4-channel) models get a per-video background model
+    # computed in a sampled pre-pass; 3-channel models are unaffected.
+    bg_provider = None
+    if model_wants_background(model):
+        print("🌄 4-channel background-conditioned model detected — building background model")
+        bg_provider = BackgroundProvider(VIDEO_PATH, fps, total_frames)
+
     # Initialize minute tracker if callback provided
     minute_tracker = None
     if video_uuid and minute_batch_callback:
@@ -1225,7 +1233,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         nms_iou=0.3,
                     )
                 else:
-                    results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=AGNOSTIC_NMS, iou=0.5, verbose=False, imgsz=1408)
+                    results = model.predict(bg_provider.stack(frame, frame_count) if bg_provider else frame, conf=CONF_THRESHOLD, agnostic_nms=AGNOSTIC_NMS, iou=0.5, verbose=False, imgsz=1408)
                 results = _filter_predictions(results, model.names)
                 boxes = results[0].boxes
 
@@ -1647,7 +1655,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     nms_iou=0.3,
                 )
             else:
-                results = model.predict(frame, conf=CONF_THRESHOLD, agnostic_nms=AGNOSTIC_NMS, iou=0.5, verbose=False, imgsz=1408)
+                results = model.predict(bg_provider.stack(frame, frame_count) if bg_provider else frame, conf=CONF_THRESHOLD, agnostic_nms=AGNOSTIC_NMS, iou=0.5, verbose=False, imgsz=1408)
             results = _filter_predictions(results, model.names)
             boxes = results[0].boxes
 

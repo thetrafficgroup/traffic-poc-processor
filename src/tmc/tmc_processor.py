@@ -20,6 +20,7 @@ from utils.overlap_detection import (
 from utils.minute_tracker import MinuteTracker
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
 from utils.ffmpeg_writer import FFmpegH264Writer
+from utils.background_model import BackgroundProvider, model_wants_background
 from crosswalk.crosswalk_processor import CrosswalkProcessor
 from crosswalk.crosswalk_minute_tracker import CrosswalkMinuteTracker
 from pedestrian.pedestrian_processor import PedestrianProcessor
@@ -351,6 +352,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # Load YOLO model
     model = YOLO(MODEL_PATH)
     print(f"✅ YOLO model loaded: {MODEL_PATH}")
+
+    # Background-conditioned (4-channel) models get a per-video background model
+    # computed in a sampled pre-pass; 3-channel models are unaffected.
+    bg_provider = None
+    if model_wants_background(model):
+        print("🌄 4-channel background-conditioned model detected — building background model")
+        bg_provider = BackgroundProvider(VIDEO_PATH, fps, total_frames)
 
     # Load optional truck subtype classifier
     truck_classifier = None
@@ -733,7 +741,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
                 # YOLO tracking
                 results = model.track(
-                    frame, persist=True, conf=CONF_THRESHOLD, imgsz=img_size,
+                    bg_provider.stack(frame, current_frame) if bg_provider else frame,
+                    persist=True, conf=CONF_THRESHOLD, imgsz=img_size,
                     iou=IOU_THRESHOLD, tracker=tracker_config, verbose=False,
                 )
 
@@ -968,7 +977,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
             # YOLO tracking
             results = model.track(
-                frame, persist=True, conf=CONF_THRESHOLD, imgsz=img_size,
+                bg_provider.stack(frame, current_frame) if bg_provider else frame,
+                persist=True, conf=CONF_THRESHOLD, imgsz=img_size,
                 iou=IOU_THRESHOLD, tracker=tracker_config, verbose=False,
             )
 
