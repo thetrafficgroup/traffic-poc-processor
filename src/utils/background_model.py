@@ -76,12 +76,42 @@ class BackgroundProvider:
                 if ret:
                     frames.append(fr)
             if len(frames) < MIN_SAMPLES:
+                print(f"🌄 window {w:02d}: SKIPPED — only {len(frames)} samples decoded "
+                      f"({f_start}-{f_end} frames); previous window's background will cover it")
                 continue
             bg = np.median(np.stack(frames), axis=0).astype(np.uint8)
+            brightness = float(cv2.cvtColor(bg, cv2.COLOR_BGR2GRAY).mean())
+            # Per-window log: across a 24h video the brightness column should
+            # visibly dip at night — a one-glance correctness signal.
+            print(f"🌄 window {w:02d}: {f_start/self.fps/60:6.1f}-{f_end/self.fps/60:6.1f} min, "
+                  f"{len(frames)} samples, brightness {brightness:.1f}")
             self.windows.append((f_start, bg))
         cap.release()
         if not self.windows:
             raise RuntimeError("no background windows could be computed")
+        self._debug_upload()
+
+    def _debug_upload(self):
+        """Upload the computed backgrounds for visual inspection when the handler
+        provides BG4CH_DEBUG_BUCKET/BG4CH_DEBUG_ID. Never fails the run."""
+        bucket = os.environ.get("BG4CH_DEBUG_BUCKET")
+        vid = os.environ.get("BG4CH_DEBUG_ID")
+        if not bucket or not vid:
+            return
+        try:
+            import boto3
+            s3 = boto3.client("s3")
+            for w, (f_start, bg) in enumerate(self.windows):
+                ok, buf = cv2.imencode(".png", bg)
+                if not ok:
+                    continue
+                key = f"logs/backgrounds/{vid}/w{w:03d}_f{f_start}.png"
+                s3.put_object(Bucket=bucket, Key=key, Body=buf.tobytes(),
+                              ContentType="image/png")
+            print(f"🌄 Uploaded {len(self.windows)} background(s) to "
+                  f"s3://{bucket}/logs/backgrounds/{vid}/")
+        except Exception as e:
+            print(f"🌄 background debug upload skipped ({e!r})")
 
     def _bg_for(self, frame_idx, shape_hw):
         best = None
@@ -101,6 +131,8 @@ class BackgroundProvider:
             best = self._resized_cache[key]
         return best
 
+    DIAG_EVERY_S = 300  # log diff health every ~5 min of video
+
     def stack(self, frame, frame_idx):
         """Return the 4-channel model input for this frame (frame is untouched)."""
         bg = self._bg_for(frame_idx, frame.shape[:2])
@@ -108,4 +140,11 @@ class BackgroundProvider:
             diff = np.zeros(frame.shape[:2], np.uint8)
         else:
             diff = cv2.absdiff(frame, bg).max(axis=2)
+        # Periodic health line: healthy scenes idle at mean diff ~2-11 gray
+        # levels (Phase 0 measurement); a corrupted/mismatched background shows
+        # up as a sustained spike far above that.
+        diag_every = max(1, int(self.DIAG_EVERY_S * self.fps))
+        if frame_idx % diag_every == 0:
+            print(f"🌄 diff health @ {frame_idx/self.fps/60:.1f} min: "
+                  f"mean={float(diff.mean()):.1f}, p99={float(np.percentile(diff, 99)):.0f}")
         return np.dstack([frame, diff])
