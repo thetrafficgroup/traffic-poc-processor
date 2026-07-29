@@ -71,6 +71,8 @@ class PedestrianProcessor:
         self.model: YOLO = YOLO(model_path)
         print(f"✅ Pedestrian model loaded: {model_path}")
 
+        conf_threshold = float(os.environ.get("PED_CONF", conf_threshold))
+
         self.crosswalk_proc = crosswalk_proc
         self.crosswalk_minute_tracker = crosswalk_minute_tracker
         self.fps = fps
