@@ -15,6 +15,7 @@ Timeout:
   CROSSED_FIRST for >60 seconds -> reset to UNCROSSED
 """
 
+import os
 from enum import Enum
 from typing import Dict, List, Optional, Tuple, Set, Any
 
@@ -39,6 +40,17 @@ DIRECTION_MAP = {
 
 CROSSING_TIMEOUT_SECONDS = 60
 DIST_THRESHOLD = 15  # Slightly more generous than vehicle tracking (pedestrians walk slower)
+
+
+def _segments_intersect(p1, p2, q1, q2) -> bool:
+    """True if segment p1->p2 properly intersects segment q1->q2 (orientation test)."""
+    def orient(a, b, c):
+        return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+    d1 = orient(q1, q2, p1)
+    d2 = orient(q1, q2, p2)
+    d3 = orient(p1, p2, q1)
+    d4 = orient(p1, p2, q2)
+    return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
 
 
 class EntityCrossingState:
@@ -117,7 +129,18 @@ class CrosswalkProcessor:
     def __init__(self, crosswalks_config: List[Dict[str, Any]], fps: float = 30.0):
         self.crosswalks: List[Crosswalk] = []
         self.fps = fps
+        self.cross_mode = os.environ.get("PED_CROSS_MODE", "band").lower()
+        self.born_inside = os.environ.get("PED_BORN_INSIDE", "0") == "1"
+        self.dist_threshold = float(os.environ.get("PED_DIST_THRESHOLD", DIST_THRESHOLD))
         self._parse_config(crosswalks_config)
+        self._quads: Dict[str, Any] = {}
+        if self.born_inside:
+            from shapely.geometry import MultiPoint
+            for cw in self.crosswalks:
+                pts = [cw.lines[0].pt1, cw.lines[0].pt2, cw.lines[1].pt1, cw.lines[1].pt2]
+                self._quads[cw.name] = MultiPoint(pts).convex_hull.buffer(3)
+        if self.cross_mode != "band" or self.born_inside:
+            print(f"🚶 Crosswalk knobs: cross_mode={self.cross_mode} born_inside={self.born_inside}")
 
         # State per (entity_id, crosswalk_name) -> EntityCrossingState
         self._entity_states: Dict[Tuple[int, str], EntityCrossingState] = {}
@@ -190,6 +213,18 @@ class CrosswalkProcessor:
         self._prev_positions[entity_id] = (cx, cy)
 
         if prev_pos is None:
+            if self.born_inside:
+                from shapely.geometry import Point
+                for crosswalk in self.crosswalks:
+                    if entity_id in self._counted_ids[crosswalk.name]:
+                        continue
+                    if self._quads[crosswalk.name].contains(Point(cx, cy)):
+                        st = self._entity_states.setdefault(
+                            (entity_id, crosswalk.name), EntityCrossingState())
+                        if st.state == CrossingState.UNCROSSED:
+                            st.state = CrossingState.CROSSED_FIRST
+                            st.first_line = "__inside__"
+                            st.first_frame = frame_number
             return None
 
         result = None
@@ -218,10 +253,17 @@ class CrosswalkProcessor:
                 x1, y1 = line.pt1
                 x2, y2 = line.pt2
 
+                seg_crossed = _segments_intersect(
+                    (prev_x, prev_y), (cx, cy), (x1, y1), (x2, y2))
                 dist = _point_line_distance(cx, cy, x1, y1, x2, y2)
                 prev_dist = _point_line_distance(prev_x, prev_y, x1, y1, x2, y2)
-
-                crossed = dist < DIST_THRESHOLD and prev_dist > DIST_THRESHOLD
+                band_crossed = dist < self.dist_threshold and prev_dist > self.dist_threshold
+                if self.cross_mode == "segment":
+                    crossed = seg_crossed
+                elif self.cross_mode == "both":
+                    crossed = seg_crossed or band_crossed
+                else:
+                    crossed = band_crossed
 
                 if not crossed:
                     continue
@@ -241,8 +283,11 @@ class CrosswalkProcessor:
                     entity_state.state = CrossingState.COUNTED
                     self._counted_ids[crosswalk.name].add(entity_id)
 
-                    # Resolve direction
-                    direction_key = (crosswalk.name, entity_state.first_line, line.name)
+                    first_for_dir = entity_state.first_line
+                    if first_for_dir == "__inside__":
+                        first_for_dir = next(
+                            l.name for l in crosswalk.lines if l.name != line.name)
+                    direction_key = (crosswalk.name, first_for_dir, line.name)
                     direction = DIRECTION_MAP.get(direction_key, "Unknown")
 
                     # Record the count

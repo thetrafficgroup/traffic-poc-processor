@@ -69,6 +69,11 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
     """Main video processing logic, separated for cleaner log capture."""
     print("🚀 HANDLER STARTED with event: ", event)  # DEBUG
 
+    # Let the background model (4ch detectors) upload its computed backgrounds
+    # for visual inspection under logs/backgrounds/<video_uuid>/.
+    os.environ["BG4CH_DEBUG_BUCKET"] = bucket
+    os.environ["BG4CH_DEBUG_ID"] = video_uuid
+
     # Use video_uuid to create unique filenames for parallel processing
     # This prevents race conditions where multiple jobs overwrite each other's files
     video_path = download_s3_file(bucket, video_key, f"video_{video_uuid}.mp4")
