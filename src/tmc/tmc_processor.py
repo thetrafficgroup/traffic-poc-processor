@@ -595,7 +595,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             # Only log at major seeking milestones to reduce log noise
             if frame_ranges:
                 # For trimming: calculate seeking progress for logging
-                start_frame = frame_ranges[0][0]
+                start_frame = frame_ranges[0]['start_frame']
                 seek_pct = int((current_frame / start_frame) * 100) if start_frame > 0 else 0
                 if seek_pct in [25, 50, 75] or current_frame >= start_frame - 1000:
                     print(f"⏩ SEEKING: Frame {current_frame}/{total_frames} ({seek_pct}% of seeking phase)")
