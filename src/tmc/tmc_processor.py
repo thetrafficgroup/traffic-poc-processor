@@ -63,9 +63,15 @@ _FIRST_POS = {}  # obj_id -> (cx, cy) at first sighting
 # died nearby just before (≤ TMC_STITCH_GAP_S, ≤ TMC_STITCH_PX), alias the new
 # id onto it so the vehicle keeps accumulating crossings under one identity.
 # The bridged prev→curr segment also recovers crossings that happened inside
-# the occlusion gap itself. Held-out validation 2026-08-19: +1.2pts, 0
-# regressions on 7 unseen hours. Disable with TMC_STITCH=0.
-_STITCH_ON = os.environ.get("TMC_STITCH", "1") == "1"
+# the occlusion gap itself.
+#
+# DEFAULT OFF: the 2026-08-19 dev A/B regressed (Rolling 91.5→86.2, Hayshed
+# 96.0→85.2) — online merging wrongly absorbs queued followers into dead
+# leader tracks (offline replay only ever ADDED chains, never merged), and the
+# 2s window sits inside BoT-SORT's 5s re-association buffer so a flickering
+# LIVE track can swallow a genuinely new vehicle. Needs velocity-consistency
+# + no-completed-turn guards before it can default on. Enable: TMC_STITCH=1.
+_STITCH_ON = os.environ.get("TMC_STITCH", "0") == "1"
 _STITCH_GAP_S = float(os.environ.get("TMC_STITCH_GAP_S", "2.0"))
 _STITCH_PX = float(os.environ.get("TMC_STITCH_PX", "80"))
 _STITCH_GAP_FRAMES = 30          # recomputed from fps at process_video start
