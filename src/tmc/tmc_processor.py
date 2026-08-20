@@ -55,44 +55,6 @@ _DEDUP_FRAMES = 30
 _MIN_DISPLACEMENT_PX = 40
 _FIRST_POS = {}  # obj_id -> (cx, cy) at first sighting
 
-# --- Attribution recovery (2026-08 forensics: 90% of the movement gap is one
-# vehicle fragmenting into consecutive tracker IDs across an occlusion, so no
-# fragment ever completes the 2 crossings a movement needs) ------------------
-#
-# Track stitching: on FIRST sight of a new tracker id, if a same-class track
-# died nearby just before (≤ TMC_STITCH_GAP_S, ≤ TMC_STITCH_PX), alias the new
-# id onto it so the vehicle keeps accumulating crossings under one identity.
-# The bridged prev→curr segment also recovers crossings that happened inside
-# the occlusion gap itself.
-#
-# DEFAULT OFF: the 2026-08-19 dev A/B regressed (Rolling 91.5→86.2, Hayshed
-# 96.0→85.2) — online merging wrongly absorbs queued followers into dead
-# leader tracks (offline replay only ever ADDED chains, never merged), and the
-# 2s window sits inside BoT-SORT's 5s re-association buffer so a flickering
-# LIVE track can swallow a genuinely new vehicle. Needs velocity-consistency
-# + no-completed-turn guards before it can default on. Enable: TMC_STITCH=1.
-_STITCH_ON = os.environ.get("TMC_STITCH", "0") == "1"
-_STITCH_GAP_S = float(os.environ.get("TMC_STITCH_GAP_S", "2.0"))
-_STITCH_PX = float(os.environ.get("TMC_STITCH_PX", "80"))
-_STITCH_GAP_FRAMES = 30          # recomputed from fps at process_video start
-_STITCH_ALIAS = {}               # raw tracker id -> canonical id it continues
-_TRACK_LAST_SEEN = {}            # canonical id -> (frame, cx, cy)
-
-# De-dup exemption: a track that crosses 2 DISTINCT counting lines is a real
-# mover — static phantoms never do that — so it gets its entry even if the
-# platoon de-dup (60px/30f) or the displacement guard rejected it earlier.
-# Disable with TMC_DEDUP_EXEMPT=0.
-_DEDUP_EXEMPT_ON = os.environ.get("TMC_DEDUP_EXEMPT", "1") == "1"
-
-# Track-fate forensics (TMC_TRACK_FORENSICS=1, off by default): per-track
-# birth/death/crossing log for attribution analysis. Pure observation, no
-# counting change. JSON dumped to TMC_FORENSICS_OUT (default
-# <video>.forensics.json). Use on untrimmed videos only — tracker ids restart
-# per trim period and records would collide.
-_FORENSICS_ON = os.environ.get("TMC_TRACK_FORENSICS", "0") == "1"
-_TRACK_FATE = {}      # obj_id -> [first_frame, fx, fy, last_frame, lx, ly, n_obs]
-_FATE_CROSSINGS = {}  # obj_id -> [(line, frame, entered, moved, dup)]
-
 
 def _segments_intersect(p1, p2, q1, q2):
     """True if segment p1→p2 properly intersects segment q1→q2 (orientation test)."""
@@ -224,45 +186,6 @@ def is_entering_from_outside(line_name, prev_pos, curr_pos, line_coords):
     return True
 
 
-def resolve_stitched_id(obj_id, class_name, cx, cy, current_frame, class_counts_by_id,
-                        turn_types_by_id):
-    """Return the canonical id this detection belongs to (track stitching).
-
-    A brand-new tracker id that appears where a same-class track died within
-    the stitch window continues that track. gap >= 2 frames is required so a
-    track that is merely later in this frame's detection loop (last seen on
-    the previous frame) can never be swallowed — genuine fragment gaps exceed
-    the tracker's own re-association ability anyway.
-    """
-    known = _STITCH_ALIAS.get(obj_id)
-    if known is not None:
-        return known
-    if obj_id in _TRACK_LAST_SEEN:
-        return obj_id
-    best, best_d2 = None, None
-    max_d2 = _STITCH_PX * _STITCH_PX
-    for cand, (lf, lx, ly) in _TRACK_LAST_SEEN.items():
-        gap = current_frame - lf
-        if gap < 2 or gap > _STITCH_GAP_FRAMES:
-            continue
-        if cand in turn_types_by_id:
-            # v2 turn-guard: never absorb into a vehicle whose movement is
-            # already complete — that merge can only destroy the new vehicle.
-            # This single guard flips the merge-aware replay from -6.8 to
-            # +0.4pts (12 hrs, no site negative); without it the 2026-08-19
-            # dev A/B regression stands.
-            continue
-        if class_counts_by_id.get(cand) != class_name:
-            continue
-        d2 = (cx - lx) ** 2 + (cy - ly) ** 2
-        if d2 <= max_d2 and (best is None or d2 < best_d2):
-            best, best_d2 = cand, d2
-    if best is not None:
-        _STITCH_ALIAS[obj_id] = best
-        return best
-    return obj_id
-
-
 def process_single_detection(
     obj_id, class_name, cx, cy, wx, wy, current_frame,
     prev_wheels, prev_centroids, counted_ids_per_line,
@@ -290,13 +213,6 @@ def process_single_detection(
         classify_turn_fn: Function to classify turn type
         track_interpolator: Optional track interpolator for centroid tracking
     """
-    # Track stitching: continue a just-died same-class track instead of
-    # starting a fresh identity (see resolve_stitched_id)
-    if _STITCH_ON:
-        obj_id = resolve_stitched_id(obj_id, class_name, cx, cy, current_frame,
-                                     class_counts_by_id, turn_types_by_id)
-        _TRACK_LAST_SEEN[obj_id] = (current_frame, cx, cy)
-
     # Store class for this object ID (first detection wins)
     if obj_id not in class_counts_by_id:
         class_counts_by_id[obj_id] = class_name
@@ -304,14 +220,6 @@ def process_single_detection(
     # Record where this track was first seen (for the static-phantom entry guard)
     if obj_id not in _FIRST_POS:
         _FIRST_POS[obj_id] = (cx, cy)
-
-    if _FORENSICS_ON:
-        _r = _TRACK_FATE.get(obj_id)
-        if _r is None:
-            _TRACK_FATE[obj_id] = [current_frame, cx, cy, current_frame, cx, cy, 1]
-        else:
-            _r[3], _r[4], _r[5] = current_frame, cx, cy
-            _r[6] += 1
 
     # Update track interpolator if available
     if track_interpolator is not None:
@@ -354,7 +262,6 @@ def process_single_detection(
                 # several IDs, so the same physical vehicle can cross a line multiple
                 # times as different IDs. Skip a new entry already counted on the SAME
                 # line, near the SAME spot, within a short window.
-                _entered_before = obj_id in entry_counted_ids
                 if obj_id not in entry_counted_ids and _moved and is_entering_fn(name, prev_centroid_pos, (cx, cy), line):
                     _dup = any(
                         _ln == name and abs(current_frame - _ff) <= _DEDUP_FRAMES
@@ -381,28 +288,15 @@ def process_single_detection(
                 # De-dup exemption: crossing a SECOND distinct line proves this
                 # is a real mover (static phantoms jitter at one line), so grant
                 # the entry the platoon de-dup / displacement guard withheld.
+                # Recovers 27-44 platoon vehicles/hr (dev A/B 2026-08-20:
+                # +2.2 to +2.9 pts turn accuracy vs manual counts).
                 # Deliberately does NOT append to _ENTRY_EVENTS — the grant must
                 # not suppress anyone else.
-                if (_DEDUP_EXEMPT_ON and obj_id not in entry_counted_ids
+                if (obj_id not in entry_counted_ids
                         and len(crossing_timestamps[obj_id]) >= 2):
                     entry_counted_ids.add(obj_id)
                     if obj_id not in detected_classes:
                         detected_classes[obj_id] = class_name
-
-                if _FORENSICS_ON:
-                    # entry-gate outcome flags for this crossing (recomputed,
-                    # no side effects). If entry was granted just now its own
-                    # event is last in _ENTRY_EVENTS — exclude it from the scan.
-                    _entered_now = (not _entered_before) and obj_id in entry_counted_ids
-                    _scan = _ENTRY_EVENTS[:-1] if _entered_now else _ENTRY_EVENTS
-                    _fdup = any(
-                        _ln == name and abs(current_frame - _ff) <= _DEDUP_FRAMES
-                        and (cx - _fx) ** 2 + (cy - _fy) ** 2 <= _DEDUP_PX * _DEDUP_PX
-                        for (_ln, _fx, _fy, _ff) in _scan
-                    )
-                    _FATE_CROSSINGS.setdefault(obj_id, []).append(
-                        (name, current_frame, obj_id in entry_counted_ids,
-                         bool(_moved), _fdup))
 
                 # Turn detection when 2+ crossings
                 if len(crossing_timestamps[obj_id]) >= 2 and obj_id not in turn_types_by_id:
@@ -519,14 +413,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # "center" entry gate (TMC_COUNT_MODE=center): a crossing counts as an entry when
     # the vehicle is moving toward this center, regardless of how lines are labeled.
     global _INTERSECTION_CENTER, _ENTRY_EVENTS, _MIN_DISPLACEMENT_PX, _FIRST_POS
-    global _STITCH_GAP_FRAMES
     _ENTRY_EVENTS = []
     _FIRST_POS = {}
-    _STITCH_ALIAS.clear()
-    _TRACK_LAST_SEEN.clear()
-    _TRACK_FATE.clear()
-    _FATE_CROSSINGS.clear()
-    _STITCH_GAP_FRAMES = max(2, int(round(_STITCH_GAP_S * (fps or 15.0))))
     _MIN_DISPLACEMENT_PX = float(os.environ.get("TMC_MIN_DISPLACEMENT_PX", "40"))
     _pts = [p for ln in LINES for p in (ln["pt1"], ln["pt2"])]
     _INTERSECTION_CENTER = (
@@ -838,8 +726,6 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             prev_centroids.clear()
             prev_wheels.clear()
             _FIRST_POS.clear()  # tracker IDs restart per period; drop stale origins
-            _STITCH_ALIAS.clear()      # ids restart -> stale aliases/last-seen would
-            _TRACK_LAST_SEEN.clear()   # stitch across the period boundary
             print("🧹 Previous positions cleared for new period")
 
             # Skip frames until we reach the start of this period (frame-skipping)
@@ -1466,58 +1352,6 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # entry-counted tracks that never completed a classified movement.
     unclassified_tracks = sum(1 for _oid in entry_counted_ids
                               if _oid not in turn_types_by_id)
-    if _STITCH_ON and _STITCH_ALIAS:
-        print(f"🧵 Track stitching: {len(_STITCH_ALIAS)} fragment id(s) merged "
-              f"into {len(set(_STITCH_ALIAS.values()))} canonical track(s)")
-    if unclassified_tracks:
-        print(f"ℹ️ {unclassified_tracks} entry-counted track(s) without a "
-              f"classified movement (reported as unclassified_tracks)")
-
-    if _FORENSICS_ON:
-        import json as _json
-        _fate_path = os.environ.get("TMC_FORENSICS_OUT") or (VIDEO_PATH + ".forensics.json")
-        _tracks = []
-        for _oid, _r in _TRACK_FATE.items():
-            _tracks.append({
-                "id": _oid,
-                "cls": class_counts_by_id.get(_oid),
-                "first_frame": _r[0], "first_pos": [_r[1], _r[2]],
-                "last_frame": _r[3], "last_pos": [_r[4], _r[5]],
-                "n_obs": _r[6],
-                "crossings": [
-                    {"line": _c[0], "frame": _c[1], "entered": _c[2],
-                     "moved": _c[3], "dup": _c[4]}
-                    for _c in _FATE_CROSSINGS.get(_oid, [])
-                ],
-                "entry_counted": _oid in entry_counted_ids,
-                "turn": turn_types_by_id.get(_oid),
-            })
-        with open(_fate_path, "w") as _fh:
-            _json.dump({
-                "video": os.path.basename(VIDEO_PATH),
-                "fps": fps,
-                "total_frames": current_frame,
-                "lines": [{"name": ln["name"], "pt1": list(ln["pt1"]),
-                           "pt2": list(ln["pt2"])} for ln in LINES],
-                "config": {
-                    "count_mode": os.environ.get("TMC_COUNT_MODE", "any"),
-                    "min_displacement_px": _MIN_DISPLACEMENT_PX,
-                    "dedup_px": _DEDUP_PX, "dedup_frames": _DEDUP_FRAMES,
-                    "stitch_on": _STITCH_ON, "stitch_gap_s": _STITCH_GAP_S,
-                    "stitch_px": _STITCH_PX,
-                    "dedup_exempt_on": _DEDUP_EXEMPT_ON,
-                },
-                "summary": {
-                    "tracks": len(_tracks),
-                    "entry_counted": len(entry_counted_ids),
-                    "with_turn": len(turn_types_by_id),
-                    "stitched_ids": len(_STITCH_ALIAS),
-                },
-                "tracks": _tracks,
-            }, _fh)
-        print(f"🔬 Track forensics written: {_fate_path} "
-              f"({len(_tracks)} tracks, {len(entry_counted_ids)} entries, "
-              f"{len(turn_types_by_id)} with turn)")
 
     return {
         # Original fields (backward compatibility)
