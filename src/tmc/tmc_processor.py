@@ -224,7 +224,8 @@ def is_entering_from_outside(line_name, prev_pos, curr_pos, line_coords):
     return True
 
 
-def resolve_stitched_id(obj_id, class_name, cx, cy, current_frame, class_counts_by_id):
+def resolve_stitched_id(obj_id, class_name, cx, cy, current_frame, class_counts_by_id,
+                        turn_types_by_id):
     """Return the canonical id this detection belongs to (track stitching).
 
     A brand-new tracker id that appears where a same-class track died within
@@ -243,6 +244,13 @@ def resolve_stitched_id(obj_id, class_name, cx, cy, current_frame, class_counts_
     for cand, (lf, lx, ly) in _TRACK_LAST_SEEN.items():
         gap = current_frame - lf
         if gap < 2 or gap > _STITCH_GAP_FRAMES:
+            continue
+        if cand in turn_types_by_id:
+            # v2 turn-guard: never absorb into a vehicle whose movement is
+            # already complete — that merge can only destroy the new vehicle.
+            # This single guard flips the merge-aware replay from -6.8 to
+            # +0.4pts (12 hrs, no site negative); without it the 2026-08-19
+            # dev A/B regression stands.
             continue
         if class_counts_by_id.get(cand) != class_name:
             continue
@@ -286,7 +294,7 @@ def process_single_detection(
     # starting a fresh identity (see resolve_stitched_id)
     if _STITCH_ON:
         obj_id = resolve_stitched_id(obj_id, class_name, cx, cy, current_frame,
-                                     class_counts_by_id)
+                                     class_counts_by_id, turn_types_by_id)
         _TRACK_LAST_SEEN[obj_id] = (current_frame, cx, cy)
 
     # Store class for this object ID (first detection wins)
