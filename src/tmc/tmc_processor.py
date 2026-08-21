@@ -67,6 +67,119 @@ def _segments_intersect(p1, p2, q1, q2):
     return ((d1 > 0) != (d2 > 0)) and ((d3 > 0) != (d4 > 0))
 
 
+def _ensure_int_point(point):
+    """Convert point coordinates to integers, handling both dict and tuple formats"""
+    if isinstance(point, dict):
+        return (int(round(point["x"])), int(round(point["y"])))
+    elif isinstance(point, (list, tuple)):
+        return (int(round(point[0])), int(round(point[1])))
+    return point
+
+
+def _is_finite_number(value):
+    """True for a real, finite int/float. Bools and strings are not coordinates."""
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _tmc_vertex(point, label, index):
+    """Validate one stored vertex, then convert it to an int (x, y).
+
+    Anything that is not a 2-element sequence of finite numbers (or the dict
+    {"x": x, "y": y} form) raises ValueError naming the line HERE, at parse time.
+    Without this check a malformed vertex passes straight through
+    _ensure_int_point and only blows up a frame later inside the crossing or
+    drawing loop as an IndexError/TypeError — and that exception class strands
+    the video in PROCESSING forever with no SQS failure message.
+    """
+    if isinstance(point, dict):
+        valid = _is_finite_number(point.get("x")) and _is_finite_number(point.get("y"))
+    elif isinstance(point, (list, tuple)):
+        valid = len(point) == 2 and all(_is_finite_number(c) for c in point)
+    else:
+        valid = False
+    if not valid:
+        raise ValueError(
+            f"TMC line '{label}' vertex {index} is not a 2-element [x, y] of finite "
+            f"numbers (or {{'x': x, 'y': y}}): {point!r}"
+        )
+    return _ensure_int_point(point)
+
+
+def tmc_line_vertices(data, name=None):
+    """THE python normaliser for a stored TMC counting line -> [(x, y), ...].
+
+    Prefers the polyline shape {"points": [[x, y], ...]} and falls back to the
+    legacy {"pt1": [x, y], "pt2": [x, y]}. This is the ONLY place in this module
+    allowed to read data["pt1"] / data["pt2"] on a stored line entry; every
+    downstream consumer reads the normalised "points" list.
+
+    A present, non-empty "points" is a commitment: it must parse. It is never
+    silently abandoned in favour of pt1/pt2.
+
+    Raises ValueError naming the line, never a bare KeyError or IndexError.
+    """
+    label = name if name is not None else repr(data)
+    vertices = None
+    if isinstance(data, dict):
+        points = data.get("points")
+        if isinstance(points, (list, tuple)) and len(points) > 0:
+            vertices = [_tmc_vertex(p, label, i) for i, p in enumerate(points)]
+        elif "pt1" in data and "pt2" in data:
+            vertices = [
+                _tmc_vertex(data["pt1"], label, "pt1"),
+                _tmc_vertex(data["pt2"], label, "pt2"),
+            ]
+    if vertices is None:
+        raise ValueError(
+            f"TMC line '{label}' has no usable geometry: expected a non-empty "
+            f"'points' list or both 'pt1' and 'pt2', got {data!r}"
+        )
+    if len(vertices) < 2:
+        # Checked here rather than trusted from the API DTO: hand-edited lane
+        # configs (proc-iter-tmc/gt/lane_configs/*.json) never pass through it.
+        raise ValueError(
+            f"TMC line '{label}' needs at least 2 vertices, got {len(vertices)}: {data!r}"
+        )
+    return vertices
+
+
+def polyline_segments(points):
+    """Consecutive vertex pairs of a polyline -> [(a, b), ...]."""
+    return [(points[i], points[i + 1]) for i in range(len(points) - 1)]
+
+
+def polyline_crosses(prev_pos, curr_pos, segments):
+    """True if the movement segment crosses ANY segment of the polyline.
+
+    A single boolean per line: a movement that crosses two segments of the same
+    polyline is still ONE crossing, so it can only ever be counted once.
+    """
+    return any(_segments_intersect(prev_pos, curr_pos, a, b) for a, b in segments)
+
+
+def intersection_center(lines):
+    """Mean of the counting lines' ENDPOINTS (first and last vertex of each line)."""
+    _pts = [p for ln in lines for p in (ln["points"][0], ln["points"][-1])]
+    return (
+        sum(p[0] for p in _pts) / len(_pts),
+        sum(p[1] for p in _pts) / len(_pts),
+    ) if _pts else None
+
+
+def line_label_anchor(points):
+    """Midpoint of the polyline's MIDDLE segment, so the label lands on the line.
+
+    For 2 vertices this is bit-identical to ((x1 + x2) // 2, (y1 + y2) // 2).
+    """
+    i = (len(points) - 1) // 2
+    (x1, y1), (x2, y2) = points[i], points[i + 1]
+    return ((x1 + x2) // 2, (y1 + y2) // 2)
+
+
 def _compute_img_size(width: int, height: int, cap: int = 1920) -> int:
     """Choose YOLO imgsz from video resolution, capped and rounded to 32."""
     longest = max(width, height)
@@ -208,7 +321,7 @@ def process_single_detection(
         counted_ids_per_line, entry_counted_ids: Counting state (mutated)
         crossed_lines_by_id, crossing_timestamps: Crossing tracking (mutated)
         turn_types_by_id, detected_classes, class_counts_by_id: Classification state (mutated)
-        LINES: List of line dicts with name, pt1, pt2
+        LINES: List of line dicts with name, points, segments
         is_entering_fn: Function to check if entering from outside
         classify_turn_fn: Function to classify turn type
         track_interpolator: Optional track interpolator for centroid tracking
@@ -232,15 +345,14 @@ def process_single_detection(
     if prev_wheels_pos and prev_centroid_pos:
         for line in LINES:
             name = line["name"]
-            x1, y1 = line["pt1"]
-            x2, y2 = line["pt2"]
+            segments = line["segments"]
 
             # True crossing: the movement segment (wheels, with centroid as a second
-            # chance) intersects the counting-line segment. Speed-independent, so
-            # fast vehicles can't step over the line between frames.
+            # chance) intersects ANY segment of the counting polyline. Speed-independent,
+            # so fast vehicles can't step over the line between frames.
             crossed = (
-                _segments_intersect(prev_wheels_pos, (wx, wy), (x1, y1), (x2, y2))
-                or _segments_intersect(prev_centroid_pos, (cx, cy), (x1, y1), (x2, y2))
+                polyline_crosses(prev_wheels_pos, (wx, wy), segments)
+                or polyline_crosses(prev_centroid_pos, (cx, cy), segments)
             )
 
             if crossed and obj_id not in counted_ids_per_line[name]:
@@ -395,32 +507,29 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     raw_lines = dict(LINES_DATA)  # Copy to avoid mutating caller's data
     crosswalks_config = raw_lines.pop("crosswalks", [])
 
-    def ensure_int_coords(point):
-        """Convert point coordinates to integers, handling both dict and tuple formats"""
-        if isinstance(point, dict):
-            return (int(round(point["x"])), int(round(point["y"])))
-        elif isinstance(point, (list, tuple)):
-            return (int(round(point[0])), int(round(point[1])))
-        return point
-
     LINES = []
     for name, data in raw_lines.items():
-        pt1 = ensure_int_coords(data["pt1"])
-        pt2 = ensure_int_coords(data["pt2"])
-        LINES.append({"name": name.upper(), "pt1": pt1, "pt2": pt2})
+        _points = tmc_line_vertices(data, name)
+        # Built once per video, not per line per detection per frame
+        # (~10^7-10^8 rebuilds on a 24 h clip).
+        LINES.append({
+            "name": name.upper(),
+            "points": _points,
+            "segments": polyline_segments(_points),
+        })
 
     # Intersection center = mean of all line endpoints. Used by the label-independent
     # "center" entry gate (TMC_COUNT_MODE=center): a crossing counts as an entry when
     # the vehicle is moving toward this center, regardless of how lines are labeled.
+    #
+    # Endpoints only, never the intermediate bend vertices: including them would drag
+    # the centre toward whichever approach was drawn with more vertices and silently
+    # change the gate for every already-processed study.
     global _INTERSECTION_CENTER, _ENTRY_EVENTS, _MIN_DISPLACEMENT_PX, _FIRST_POS
     _ENTRY_EVENTS = []
     _FIRST_POS = {}
     _MIN_DISPLACEMENT_PX = float(os.environ.get("TMC_MIN_DISPLACEMENT_PX", "40"))
-    _pts = [p for ln in LINES for p in (ln["pt1"], ln["pt2"])]
-    _INTERSECTION_CENTER = (
-        sum(p[0] for p in _pts) / len(_pts),
-        sum(p[1] for p in _pts) / len(_pts),
-    ) if _pts else None
+    _INTERSECTION_CENTER = intersection_center(LINES)
 
     counts = {line["name"]: 0 for line in LINES}
     counted_ids_per_line = {line["name"]: set() for line in LINES}
@@ -898,12 +1007,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     # Draw lines
                     for line in LINES:
                         name = line["name"]
-                        x1, y1 = line["pt1"]
-                        x2, y2 = line["pt2"]
-                        cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
+                        pts = np.array(line["points"], dtype=np.int32).reshape((-1, 1, 2))
+                        cv2.polylines(frame, [pts], False, (0, 255, 255), 3)
 
                         # Draw line label and count
-                        mid_x, mid_y = (x1 + x2) // 2, (y1 + y2) // 2
+                        mid_x, mid_y = line_label_anchor(line["points"])
                         cv2.putText(frame, f'{name}: {counts[name]}', (mid_x, mid_y - 10),
                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
@@ -1133,12 +1241,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                 # Draw lines
                 for line in LINES:
                     name = line["name"]
-                    x1, y1 = line["pt1"]
-                    x2, y2 = line["pt2"]
-                    cv2.line(frame, (x1, y1), (x2, y2), (0, 255, 255), 3)
+                    pts = np.array(line["points"], dtype=np.int32).reshape((-1, 1, 2))
+                    cv2.polylines(frame, [pts], False, (0, 255, 255), 3)
 
                     # Draw line label and count
-                    mid_x, mid_y = (x1 + x2) // 2, (y1 + y2) // 2
+                    mid_x, mid_y = line_label_anchor(line["points"])
                     cv2.putText(frame, f'{name}: {counts[name]}', (mid_x, mid_y - 10),
                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
