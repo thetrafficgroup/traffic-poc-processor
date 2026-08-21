@@ -142,13 +142,17 @@ def build_analysis_by_vehicle_class(detected_classes, turn_types_by_id, crossing
             if vehicle_id in crossing_timestamps and crossing_timestamps[vehicle_id]:
                 origin_direction = crossing_timestamps[vehicle_id][0][0]
                 
-                # Determine turn type
+                # Determine turn type. A vehicle whose movement was never
+                # classified (single crossing) is NOT assumed straight anymore:
+                # that padding made results.vehicles disagree with the minute
+                # rollup the TMC report reads, and inflated 'straight' by the
+                # whole attribution residual. Unclassified tracks are surfaced
+                # separately (results.unclassified_tracks).
                 if vehicle_id in turn_types_by_id:
                     turn_type = turn_types_by_id[vehicle_id]
                 else:
-                    # If no turn detected, assume straight
-                    turn_type = "straight"
-                
+                    continue
+
                 # Increment counters
                 if origin_direction in analysis[vehicle_class] and turn_type in analysis[vehicle_class][origin_direction]:
                     analysis[vehicle_class][origin_direction][turn_type] += 1
@@ -280,6 +284,19 @@ def process_single_detection(
                     current_time = time_mod.time()
                     crossed_lines_by_id[obj_id].append(name)
                     crossing_timestamps[obj_id].append((name, current_time))
+
+                # De-dup exemption: crossing a SECOND distinct line proves this
+                # is a real mover (static phantoms jitter at one line), so grant
+                # the entry the platoon de-dup / displacement guard withheld.
+                # Recovers 27-44 platoon vehicles/hr (dev A/B 2026-08-20:
+                # +2.2 to +2.9 pts turn accuracy vs manual counts).
+                # Deliberately does NOT append to _ENTRY_EVENTS — the grant must
+                # not suppress anyone else.
+                if (obj_id not in entry_counted_ids
+                        and len(crossing_timestamps[obj_id]) >= 2):
+                    entry_counted_ids.add(obj_id)
+                    if obj_id not in detected_classes:
+                        detected_classes[obj_id] = class_name
 
                 # Turn detection when 2+ crossings
                 if len(crossing_timestamps[obj_id]) >= 2 and obj_id not in turn_types_by_id:
@@ -1331,6 +1348,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         crosswalk_totals = ped_processor.get_crosswalk_totals()
         ped_processor.finalize_crosswalk_minute_tracker()
 
+    # Attribution residual, surfaced instead of padded into 'straight':
+    # entry-counted tracks that never completed a classified movement.
+    unclassified_tracks = sum(1 for _oid in entry_counted_ids
+                              if _oid not in turn_types_by_id)
+
     return {
         # Original fields (backward compatibility)
         "counts": counts,
@@ -1342,9 +1364,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         # NEW: Analysis grouped by vehicle class first
         "vehicles": vehicles,
 
+        "unclassified_tracks": unclassified_tracks,
+
         "validation": {
             "total_vehicles": total_count,
             "vehicles_with_movement": vehicles_with_movement,
+            "unclassified_tracks": unclassified_tracks,
             "total_turns": sum(turns_dict.values()),
             "validation_passed": vehicles_with_movement == sum(turns_dict.values()),
             "entry_vehicles": len(entry_counted_ids),
