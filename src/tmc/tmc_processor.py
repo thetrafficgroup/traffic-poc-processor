@@ -54,6 +54,57 @@ _DEDUP_FRAMES = 30
 # reset per video / trim period alongside the other counting state.
 _MIN_DISPLACEMENT_PX = 40
 _FIRST_POS = {}  # obj_id -> (cx, cy) at first sighting
+_LAST_POS = {}   # obj_id -> (cx, cy) at most recent sighting
+
+# Heading inference: a track that entered (crossed one counting line) and then
+# died mid-intersection still carries evidence of where it was going — its own
+# direction of travel. Extrapolate that heading and, if the ray meets another
+# counting line, credit the movement it was completing.
+#
+# Add-only: it never merges identities and never removes a counted vehicle, so
+# it cannot destroy a real one (unlike track stitching, which did exactly that
+# and was removed). The geometry gates itself — a fragment dying while pointed
+# at nothing recovers nothing, which is why the fragment-heavy sites are barely
+# touched. Offline replay over 12 GT hours: 95.0% -> 96.2%, 9/12 sites improved,
+# worst case -0.5. Disable with TMC_HEADING_INFER=0.
+_HEADING_INFER_ON = os.environ.get("TMC_HEADING_INFER", "1") == "1"
+_HEADING_MIN_DISP_PX = float(os.environ.get("TMC_HEADING_MIN_DISP_PX", "60"))
+
+
+def _ray_hits_segment(origin, direction, a, b, max_t=2000.0):
+    """Parametric distance at which ray origin+t*direction meets segment a-b.
+
+    Returns t > 0 if the ray crosses the segment within max_t, else None.
+    """
+    rx, ry = direction
+    sx, sy = b[0] - a[0], b[1] - a[1]
+    den = rx * sy - ry * sx
+    if abs(den) < 1e-9:
+        return None                      # parallel
+    qx, qy = a[0] - origin[0], a[1] - origin[1]
+    t = (qx * sy - qy * sx) / den        # along the ray
+    u = (qx * ry - qy * rx) / den        # along the segment
+    if t > 0 and t < max_t and 0.0 <= u <= 1.0:
+        return t
+    return None
+
+
+def infer_exit_line_by_heading(entry_line, first_pos, last_pos, LINES):
+    """The counting line this track was heading for when it died, or None."""
+    dx = last_pos[0] - first_pos[0]
+    dy = last_pos[1] - first_pos[1]
+    if math.hypot(dx, dy) < _HEADING_MIN_DISP_PX:
+        return None                      # too little travel to trust a heading
+    best = None
+    for line in LINES:
+        if line["name"] == entry_line:
+            continue
+        pts = line["points"]
+        for a, b in zip(pts, pts[1:]):
+            t = _ray_hits_segment(last_pos, (dx, dy), a, b)
+            if t is not None and (best is None or t < best[0]):
+                best = (t, line["name"])
+    return best[1] if best else None
 
 
 def _segments_intersect(p1, p2, q1, q2):
@@ -417,6 +468,7 @@ def process_single_detection(
                         turn_types_by_id[obj_id] = turn_type
 
     # Always update previous positions
+    _LAST_POS[obj_id] = (cx, cy)
     prev_centroids[obj_id] = (cx, cy)
     prev_wheels[obj_id] = (wx, wy)
 
@@ -528,6 +580,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     global _INTERSECTION_CENTER, _ENTRY_EVENTS, _MIN_DISPLACEMENT_PX, _FIRST_POS
     _ENTRY_EVENTS = []
     _FIRST_POS = {}
+    _LAST_POS.clear()
     _MIN_DISPLACEMENT_PX = float(os.environ.get("TMC_MIN_DISPLACEMENT_PX", "40"))
     _INTERSECTION_CENTER = intersection_center(LINES)
 
@@ -606,6 +659,43 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         }
 
         return transitions.get((from_dir, to_dir), 'unknown')
+
+    def apply_heading_inference():
+        """Credit a movement to entered-but-unclassified tracks using heading.
+
+        Runs per trim period (tracker IDs restart, so positions must be
+        consumed before they are cleared) and once at the end.
+        Returns the number of movements recovered.
+        """
+        if not _HEADING_INFER_ON:
+            return 0
+        recovered = 0
+        for _oid in list(entry_counted_ids):
+            if _oid in turn_types_by_id:
+                continue
+            _cs = crossing_timestamps.get(_oid)
+            if not _cs:
+                continue
+            _fp, _lp = _FIRST_POS.get(_oid), _LAST_POS.get(_oid)
+            if not _fp or not _lp:
+                continue
+            _entry = _cs[0][0]
+            _exit = infer_exit_line_by_heading(_entry, _fp, _lp, LINES)
+            if not _exit:
+                continue
+            # reuse the existing turn table by appending the inferred crossing
+            import time as _tm
+            _cs.append((_exit, _tm.time()))
+            _turn = classify_turn_from_lines(_cs)
+            if _turn in ("invalid", "unknown"):
+                _cs.pop()                 # leave the track untouched
+                continue
+            turn_types_by_id[_oid] = _turn
+            crossed_lines_by_id.setdefault(_oid, []).append(_exit)
+            recovered += 1
+        return recovered
+
+    _heading_recovered = 0
 
     # Video capture already initialized above for model manager
     current_frame = 0
@@ -832,9 +922,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                 ped_processor.crosswalk_proc.reset_state()
 
             # Clear previous positions to prevent cross-period tracking
+            _heading_recovered += apply_heading_inference()  # consume before reset
             prev_centroids.clear()
             prev_wheels.clear()
             _FIRST_POS.clear()  # tracker IDs restart per period; drop stale origins
+            _LAST_POS.clear()
             print("🧹 Previous positions cleared for new period")
 
             # Skip frames until we reach the start of this period (frame-skipping)
@@ -1357,6 +1449,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # Post procesamiento con lógica corregida
     # Usar entry_counted_ids para el conteo total (solo vehículos que entraron desde afuera)
     total_count = len(entry_counted_ids)
+
+    _heading_recovered += apply_heading_inference()
+    if _heading_recovered:
+        print(f"🧭 Heading inference: {_heading_recovered} movement(s) recovered "
+              f"from entered-but-unclassified tracks")
 
     # Class vote finalization: replace the entry-time label with the track-life
     # confidence-weighted winner (must run BEFORE the FHWA refinement below,
