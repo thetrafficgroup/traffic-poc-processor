@@ -54,6 +54,13 @@ _DEDUP_FRAMES = 30
 # reset per video / trim period alongside the other counting state.
 _MIN_DISPLACEMENT_PX = 40
 _FIRST_POS = {}  # obj_id -> (cx, cy) at first sighting
+
+# Centroid-fallback policy for line crossings (see the crossing test below).
+# "shortclass" (default): fallback only for classes whose centroid sits near
+# the ground. "both": legacy behaviour, fallback for every class. "wheels":
+# no fallback (diagnostic only).
+_CROSS_POINT_MODE = os.environ.get("TMC_CROSS_POINT", "shortclass")
+_CENTROID_OK_CLASSES = {"car", "pickup_truck", "work_van", "motorcycle"}
 _LAST_POS = {}   # obj_id -> (cx, cy) at most recent sighting
 
 # Heading inference: a track that entered (crossed one counting line) and then
@@ -401,9 +408,23 @@ def process_single_detection(
             # True crossing: the movement segment (wheels, with centroid as a second
             # chance) intersects ANY segment of the counting polyline. Speed-independent,
             # so fast vehicles can't step over the line between frames.
+            # Wheel path is the ground-truth crossing test. The centroid path is a
+            # fallback for when the box bottom is unreliable (occluded queues,
+            # truncation) — but ONLY for short vehicle classes: a tall body's
+            # centroid projects over lines its wheels never approach, inventing
+            # crossings (York Rd 2026-08: bus bodies clipping a far line turned
+            # 13 through-movements/hr into phantom right turns). Battery-3 live
+            # A/B: York day 92.5%->95.4% with dense guard sites byte-identical.
+            # Kill switch: TMC_CROSS_POINT=both restores the old behaviour.
+            _fallback_ok = (
+                _CROSS_POINT_MODE == "both"
+                or (_CROSS_POINT_MODE == "shortclass"
+                    and class_name in _CENTROID_OK_CLASSES)
+            )
             crossed = (
                 polyline_crosses(prev_wheels_pos, (wx, wy), segments)
-                or polyline_crosses(prev_centroid_pos, (cx, cy), segments)
+                or (_fallback_ok
+                    and polyline_crosses(prev_centroid_pos, (cx, cy), segments))
             )
 
             if crossed and obj_id not in counted_ids_per_line[name]:
