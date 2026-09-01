@@ -1620,27 +1620,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         uturn_count = turns_dict.get('u-turn', 0)
         turns_dict['straight'] = max(0, vehicles_with_movement - left_count - right_count - uturn_count)
     
-    # Finalize minute tracking if enabled
-    video_duration_seconds = None
-    if minute_tracker:
-        video_duration_seconds = minute_tracker.finalize_processing()
-        print(f"📊 Video duration calculated: {video_duration_seconds} seconds")
-
-    # Finalize crosswalk tracking
-    crosswalk_results = None
-    crosswalk_totals = None
-    if ped_processor is not None:
-        crosswalk_results = ped_processor.get_crosswalk_results()
-        crosswalk_totals = ped_processor.get_crosswalk_totals()
-        ped_processor.finalize_crosswalk_minute_tracker()
-
-    # Attribution residual, surfaced instead of padded into 'straight':
-    # entry-counted tracks that never completed a classified movement.
-    unclassified_tracks = sum(1 for _oid in entry_counted_ids
-                              if _oid not in turn_types_by_id)
-
     # Attribution estimate (see _IMPUTE_ALPHA above). Applied to `vehicles` and to
-    # the deferred minute rows; `counts`, `total_count` and `validation` keep the
+    # the buffered minute rows; `counts`, `total_count` and `validation` keep the
     # raw observation, and entry_vehicles in particular MUST stay raw since it is
     # the input to this estimate.
     imputed_vehicles = 0
@@ -1673,6 +1654,27 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             print(f"📈 Attribution estimate: minute_observed={_observed} "
                   f"entries={len(entry_counted_ids)} gap={_gap} -> "
                   f"+{int(round(_add))} estimated (video view +{_placed})")
+
+    # Finalize minute tracking. MUST come after the estimate above:
+    # finalize_processing flushes every buffered minute to SQS, and a row that has
+    # already been sent cannot be revised.
+    video_duration_seconds = None
+    if minute_tracker:
+        video_duration_seconds = minute_tracker.finalize_processing()
+        print(f"📊 Video duration calculated: {video_duration_seconds} seconds")
+
+    # Finalize crosswalk tracking
+    crosswalk_results = None
+    crosswalk_totals = None
+    if ped_processor is not None:
+        crosswalk_results = ped_processor.get_crosswalk_results()
+        crosswalk_totals = ped_processor.get_crosswalk_totals()
+        ped_processor.finalize_crosswalk_minute_tracker()
+
+    # Attribution residual, surfaced instead of padded into 'straight':
+    # entry-counted tracks that never completed a classified movement.
+    unclassified_tracks = sum(1 for _oid in entry_counted_ids
+                              if _oid not in turn_types_by_id)
 
     return {
         # Original fields (backward compatibility)
