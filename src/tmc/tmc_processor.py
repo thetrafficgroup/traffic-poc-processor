@@ -17,7 +17,7 @@ from utils.overlap_detection import (
     soft_nms, detect_occlusions, adjust_confidence_for_occlusion,
     TrackInterpolator, post_process_detections, analyze_overlap_patterns
 )
-from utils.minute_tracker import MinuteTracker
+from utils.minute_tracker import MinuteTracker, apportion, collect_class_cells, recompute_totals
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
 from utils.ffmpeg_writer import FFmpegH264Writer
 from utils.background_model import BackgroundProvider, model_wants_background
@@ -68,6 +68,33 @@ _CENTROID_OK_CLASSES = {"car", "pickup_truck", "work_van", "motorcycle"}
 # wheels never approach (phantom turns); a point this low does not, while a
 # truck whose wheel point merely grazed the line is still recovered.
 _TALL_FRAC = float(os.environ.get("TMC_TALL_FRAC", "0.6"))
+
+# Attribution estimate. A track that entered the intersection but never completed
+# a classified movement is mostly a REAL vehicle we detected and failed to
+# attribute; the rest are fragments of vehicles already counted. Over 15 ground
+# truth hours that entry gap predicts the true undercount at r^2 = 0.968 — far
+# better than traffic volume (0.46) — and 14 of 15 sites undercount, 638 vehicles
+# missing against 55 spurious. The missing vehicles follow the observed turn
+# distribution closely (70% of them are 'straight'; 'straight' is 74% of observed
+# volume), so they are placed proportionally rather than dumped into one movement.
+#
+# Only the gap ABOVE a normal fragmentation floor (BETA of observed volume) is
+# treated as missing, and the estimate is capped at CAP of observed volume. Those
+# two guards make the correction fire only where the evidence is strong: on the
+# 15 GT hours it touches 5 sites and leaves 10 untouched.
+# Leave-one-site-out through this exact code path: +1.2 pts pooled turn accuracy,
+# 5/15 sites improved, and NO site made worse.
+# A more aggressive setting (BETA=0.03, CAP=1.0) scores +2.0 pooled but costs one
+# site -3.0, which fails our no-site-below--0.5 rule; hence the guarded default.
+#
+# Counts become ESTIMATES. The raw observation is preserved in `counts`,
+# `total_count` and `validation` (entry_vehicles especially, since it is the
+# input to this estimate), and `imputed_vehicles` reports how many were added.
+# Disable entirely with TMC_IMPUTE=0.
+_IMPUTE_ON = os.environ.get("TMC_IMPUTE", "1") == "1"
+_IMPUTE_ALPHA = float(os.environ.get("TMC_IMPUTE_ALPHA", "2.375"))
+_IMPUTE_BETA = float(os.environ.get("TMC_IMPUTE_BETA", "0.09"))
+_IMPUTE_CAP = float(os.environ.get("TMC_IMPUTE_CAP", "0.06"))
 
 
 def _low_point(centroid, wheels):
@@ -788,7 +815,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         else:
             print(f"✅ Using provided video_uuid: {video_uuid}")
             
-        minute_tracker = MinuteTracker(fps, video_uuid, minute_batch_callback)
+        minute_tracker = MinuteTracker(fps, video_uuid, minute_batch_callback,
+                                       defer_batches=_IMPUTE_ON)
         print(f"📊 Enhanced minute tracking enabled for video {video_uuid}")
 
     # Initialize pedestrian/bicycle processor if crosswalks are configured
@@ -1611,6 +1639,41 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     unclassified_tracks = sum(1 for _oid in entry_counted_ids
                               if _oid not in turn_types_by_id)
 
+    # Attribution estimate (see _IMPUTE_ALPHA above). Applied to `vehicles` and to
+    # the deferred minute rows; `counts`, `total_count` and `validation` keep the
+    # raw observation, and entry_vehicles in particular MUST stay raw since it is
+    # the input to this estimate.
+    imputed_vehicles = 0
+    _raw_turn_total = sum(turns_dict.values())
+    if _IMPUTE_ON:
+        _video_obs = sum(v for _d in vehicles.get("total", {}).values()
+                         for v in _d.values())
+        # Basis is the MINUTE rollup: that is what the customer report reads and
+        # what the coefficients were fitted against. It can sit below the video
+        # tally (a movement attributed after the last minute was finalized), so
+        # using the video total here would systematically under-correct.
+        _observed = (minute_tracker.observed_total()
+                     if minute_tracker is not None else _video_obs)
+        _gap = len(entry_counted_ids) - _observed
+        _add = min(_IMPUTE_ALPHA * max(0.0, _gap - _IMPUTE_BETA * _observed),
+                   _IMPUTE_CAP * _observed)
+        if _observed > 0 and _add >= 1.0:
+            if minute_tracker is not None:
+                imputed_vehicles = minute_tracker.apply_imputation(_add)
+            # Scale the video-level view by the SAME factor, so the two stay
+            # coherent even though their baselines differ.
+            _factor = (_observed + _add) / _observed
+            _placed = apportion(collect_class_cells(vehicles),
+                                _video_obs * (_factor - 1.0))
+            recompute_totals(vehicles)
+            imputed_vehicles = imputed_vehicles or _placed
+            # Keep the turn summary consistent with the estimated vehicle table.
+            turns_dict = {t: sum(_d.get(t, 0) for _d in vehicles["total"].values())
+                          for t in ("left", "right", "straight", "u-turn")}
+            print(f"📈 Attribution estimate: minute_observed={_observed} "
+                  f"entries={len(entry_counted_ids)} gap={_gap} -> "
+                  f"+{int(round(_add))} estimated (video view +{_placed})")
+
     return {
         # Original fields (backward compatibility)
         "counts": counts,
@@ -1623,14 +1686,16 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         "vehicles": vehicles,
 
         "unclassified_tracks": unclassified_tracks,
+        "imputed_vehicles": imputed_vehicles,
 
         "validation": {
             "total_vehicles": total_count,
             "vehicles_with_movement": vehicles_with_movement,
             "unclassified_tracks": unclassified_tracks,
             "total_turns": sum(turns_dict.values()),
-            "validation_passed": vehicles_with_movement == sum(turns_dict.values()),
+            "validation_passed": vehicles_with_movement == _raw_turn_total,
             "entry_vehicles": len(entry_counted_ids),
+            "imputed_vehicles": imputed_vehicles,
             "total_crossings": sum(counts.values())
         },
 

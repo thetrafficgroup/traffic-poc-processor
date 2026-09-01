@@ -8,14 +8,78 @@ import uuid
 from typing import Dict, List, Optional, Callable, Any, Set
 
 
+def collect_class_cells(vehicles: Dict[str, Any]) -> List[tuple]:
+    """Every non-zero per-class movement cell as (turns_dict, turn_key, count).
+
+    The "total" block is derived, never a source — see recompute_totals.
+    """
+    out = []
+    for cls, dirs in vehicles.items():
+        if cls == "total" or not isinstance(dirs, dict):
+            continue
+        for _d, turns in dirs.items():
+            if not isinstance(turns, dict):
+                continue
+            for t, v in turns.items():
+                if isinstance(v, int) and v > 0:
+                    out.append((turns, t, v))
+    return out
+
+
+def recompute_totals(vehicles: Dict[str, Any]) -> None:
+    """Rebuild vehicles["total"] as the sum over per-class blocks."""
+    tot: Dict[str, Dict[str, int]] = {}
+    for cls, dirs in vehicles.items():
+        if cls == "total" or not isinstance(dirs, dict):
+            continue
+        for d, turns in dirs.items():
+            if not isinstance(turns, dict):
+                continue
+            td = tot.setdefault(d, {})
+            for t, v in turns.items():
+                td[t] = td.get(t, 0) + int(v)
+    if tot:
+        vehicles["total"] = tot
+
+
+def apportion(cells: List[tuple], add: float) -> int:
+    """Add `add` vehicles across `cells` in proportion to their counts.
+
+    Uses largest-remainder apportionment: independent per-cell rounding would
+    systematically LOSE vehicles, because a ~5% uplift on many small cells
+    rounds to zero far more often than it rounds up. This adds exactly
+    round(add) vehicles, deterministically.
+    """
+    target = int(round(add))
+    total = sum(v for _t, _k, v in cells)
+    if target <= 0 or total <= 0 or not cells:
+        return 0
+    exact = [v * target / total for _t, _k, v in cells]
+    floors = [int(e) for e in exact]
+    short = target - sum(floors)
+    if short > 0:
+        order = sorted(range(len(cells)), key=lambda i: (floors[i] - exact[i], -cells[i][2]))
+        for i in order[:short]:
+            floors[i] += 1
+    for (turns, key, v), extra in zip(cells, floors):
+        turns[key] = v + extra
+    return target
+
+
 class MinuteTracker:
     """
     Tracks vehicle detections and movements on a per-minute basis.
     Manages batching and SQS message preparation with proper vehicle-direction-turn nesting.
     """
     
-    def __init__(self, fps: float, video_uuid: str, batch_callback: Optional[Callable] = None):
+    def __init__(self, fps: float, video_uuid: str, batch_callback: Optional[Callable] = None,
+                 defer_batches: bool = False):
         self.fps = fps
+        # Hold every minute until finalize_processing so the attribution estimate
+        # (known only once the whole video is counted) can be applied before the
+        # rows are sent. Progress reporting uses a separate callback and is
+        # unaffected; a video that dies mid-run is reprocessed from scratch anyway.
+        self.defer_batches = defer_batches
         self.video_uuid = video_uuid
         self.batch_callback = batch_callback
 
@@ -144,6 +208,8 @@ class MinuteTracker:
     
     def _check_and_send_batch(self) -> None:
         """Check if we should send a batch and send it if ready."""
+        if self.defer_batches:
+            return
         completed_minutes = [m for m in self.minute_data.keys() if m < self.current_minute]
         
         # Group completed minutes into batches of BATCH_SIZE
@@ -204,6 +270,37 @@ class MinuteTracker:
         except Exception as e:
             print(f"❌ Failed to send batch {batch_id}: {e}")
     
+    def observed_total(self) -> int:
+        """Movements currently held across all buffered minutes.
+
+        This — not the video-level tally — is the basis for the attribution
+        estimate: the customer report reads the minute rows, and the two can
+        differ (a movement attributed after the last minute was finalized lands
+        in the video total only). The estimate's coefficients were fitted
+        against these minute sums.
+        """
+        return sum(v for m in self.minute_data.values()
+                   for _d, turns in (m.get("vehicles", {}).get("total") or {}).items()
+                   for v in turns.values())
+
+    def apply_imputation(self, add: float) -> int:
+        """Distribute `add` estimated vehicles over every buffered minute.
+
+        Proportional to the observed movement distribution across the whole
+        video, so a dense minute receives more than a quiet one. Only valid
+        while deferring — once a batch is sent its row cannot be revised.
+        """
+        cells = []
+        for m in sorted(self.minute_data):
+            cells.extend(collect_class_cells(self.minute_data[m].get("vehicles", {})))
+        placed = apportion(cells, add)
+        if placed:
+            for m in self.minute_data:
+                recompute_totals(self.minute_data[m].get("vehicles", {}))
+            print(f"📈 Attribution estimate: +{placed} vehicles across "
+                  f"{len(self.minute_data)} minutes")
+        return placed
+
     def finalize_processing(self) -> int:
         """
         Finalize processing and send any remaining batches.
@@ -215,10 +312,12 @@ class MinuteTracker:
         if self.current_minute in self.minute_data:
             self._finalize_minute(self.current_minute)
         
-        # Send any remaining minutes as a final batch
-        remaining_minutes = list(self.minute_data.keys())
-        if remaining_minutes:
-            self._send_batch(remaining_minutes)
+        # Send remaining minutes (all of them, when batches were deferred)
+        remaining_minutes = sorted(self.minute_data.keys())
+        while remaining_minutes:
+            chunk = remaining_minutes[:self.BATCH_SIZE]
+            self._send_batch(chunk)
+            remaining_minutes = remaining_minutes[self.BATCH_SIZE:]
         
         # Calculate total duration
         total_duration = (self.current_minute + 1) * 60  # Convert minutes to seconds
