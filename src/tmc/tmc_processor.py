@@ -55,12 +55,26 @@ _DEDUP_FRAMES = 30
 _MIN_DISPLACEMENT_PX = 40
 _FIRST_POS = {}  # obj_id -> (cx, cy) at first sighting
 
-# Centroid-fallback policy for line crossings (see the crossing test below).
-# "shortclass" (default): fallback only for classes whose centroid sits near
-# the ground. "both": legacy behaviour, fallback for every class. "wheels":
-# no fallback (diagnostic only).
-_CROSS_POINT_MODE = os.environ.get("TMC_CROSS_POINT", "shortclass")
+# Fallback policy for line crossings (see the crossing test below).
+# "tallpoint" (default): tall bodies fall back on a point low in the box,
+# short classes on the centroid. "shortclass": no fallback at all for tall
+# bodies (over-broad — dropped real trucks). "both": legacy, centroid fallback
+# for every class. "tallall": the low point for every class. "wheels": no
+# fallback (diagnostic only).
+_CROSS_POINT_MODE = os.environ.get("TMC_CROSS_POINT", "tallpoint")
 _CENTROID_OK_CLASSES = {"car", "pickup_truck", "work_van", "motorcycle"}
+# Geometric fallback point: a fraction of the way from centroid to wheels.
+# 0.6 == 80% of box height. A tall body's CENTROID projects across lines its
+# wheels never approach (phantom turns); a point this low does not, while a
+# truck whose wheel point merely grazed the line is still recovered.
+_TALL_FRAC = float(os.environ.get("TMC_TALL_FRAC", "0.6"))
+
+
+def _low_point(centroid, wheels):
+    return (centroid[0] + (wheels[0] - centroid[0]) * _TALL_FRAC,
+            centroid[1] + (wheels[1] - centroid[1]) * _TALL_FRAC)
+
+
 _LAST_POS = {}   # obj_id -> (cx, cy) at most recent sighting
 
 # Heading inference: a track that entered (crossed one counting line) and then
@@ -408,23 +422,42 @@ def process_single_detection(
             # True crossing: the movement segment (wheels, with centroid as a second
             # chance) intersects ANY segment of the counting polyline. Speed-independent,
             # so fast vehicles can't step over the line between frames.
-            # Wheel path is the ground-truth crossing test. The centroid path is a
-            # fallback for when the box bottom is unreliable (occluded queues,
-            # truncation) — but ONLY for short vehicle classes: a tall body's
-            # centroid projects over lines its wheels never approach, inventing
-            # crossings (York Rd 2026-08: bus bodies clipping a far line turned
-            # 13 through-movements/hr into phantom right turns). Battery-3 live
-            # A/B: York day 92.5%->95.4% with dense guard sites byte-identical.
+            # Wheel path is the ground-truth crossing test. When the box bottom is
+            # unreliable (occluded queues, truncation) a second path is tried — but
+            # WHICH point matters. A tall body's centroid projects over lines its
+            # wheels never approach, inventing crossings (York Rd 2026-08: bus
+            # bodies clipping a far line turned 13 through-movements/hr into
+            # phantom right turns). Banning the fallback outright for tall classes
+            # (the earlier "shortclass" rule) fixed York but dropped REAL trucks
+            # whose wheel point merely grazed the line: over 16 GT hours it cost
+            # Oella -1.2, Hayshed -0.6 and Sanford -0.5, shedding heavy classes on
+            # straight movements (SUT -34, heavy_pickup -20, artic -10).
+            # So keep the fallback for every class, but evaluate tall bodies at a
+            # point 80% down the box instead of the centroid. Battery 4 (full GT
+            # hours): York 92.5 -> 95.8 (beating shortclass's 95.4) while Oella,
+            # Hayshed and Sanford all return to baseline. Insensitive to the exact
+            # fraction — 0.6 and 0.8 scored identically on all four sites.
             # Kill switch: TMC_CROSS_POINT=both restores the old behaviour.
-            _fallback_ok = (
-                _CROSS_POINT_MODE == "both"
-                or (_CROSS_POINT_MODE == "shortclass"
-                    and class_name in _CENTROID_OK_CLASSES)
-            )
+            if _CROSS_POINT_MODE in ("tallpoint", "tallall"):
+                if (_CROSS_POINT_MODE == "tallall"
+                        or class_name not in _CENTROID_OK_CLASSES):
+                    fb_prev = _low_point(prev_centroid_pos, prev_wheels_pos)
+                    fb_cur = _low_point((cx, cy), (wx, wy))
+                else:
+                    fb_prev, fb_cur = prev_centroid_pos, (cx, cy)
+                fallback = polyline_crosses(fb_prev, fb_cur, segments)
+            else:
+                _fallback_ok = (
+                    _CROSS_POINT_MODE == "both"
+                    or (_CROSS_POINT_MODE == "shortclass"
+                        and class_name in _CENTROID_OK_CLASSES)
+                )
+                fallback = (_fallback_ok
+                            and polyline_crosses(prev_centroid_pos, (cx, cy),
+                                                 segments))
             crossed = (
                 polyline_crosses(prev_wheels_pos, (wx, wy), segments)
-                or (_fallback_ok
-                    and polyline_crosses(prev_centroid_pos, (cx, cy), segments))
+                or fallback
             )
 
             if crossed and obj_id not in counted_ids_per_line[name]:
