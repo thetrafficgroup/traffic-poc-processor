@@ -56,9 +56,16 @@ _MIN_DISPLACEMENT_PX = 40
 _FIRST_POS = {}  # obj_id -> (cx, cy) at first sighting
 
 # Fallback policy for line crossings (see the crossing test below): "tallpoint"
-# (default) measures tall bodies low in the box, short classes at the centroid;
-# "both" is the legacy centroid-for-everything; "wheels" disables the fallback.
+# (default) measures tall bodies low in the box and short classes at the centroid;
+# "both" is the legacy centroid-for-everything (what prod ran before); "wheels"
+# disables the fallback entirely and is diagnostic only.
 _CROSS_POINT_MODE = os.environ.get("TMC_CROSS_POINT", "tallpoint")
+if _CROSS_POINT_MODE not in ("tallpoint", "both", "wheels"):
+    raise ValueError(
+        f"TMC_CROSS_POINT={_CROSS_POINT_MODE!r} is not a known mode "
+        "(tallpoint, both, wheels) — refusing to start rather than silently "
+        "counting with the wrong crossing rule"
+    )
 _CENTROID_OK_CLASSES = {"car", "pickup_truck", "work_van", "motorcycle"}
 # Geometric fallback point: a fraction of the way from centroid to wheels.
 # 0.6 == 80% of box height. A tall body's CENTROID projects across lines its
@@ -80,62 +87,22 @@ _IMPUTE_BETA = float(os.environ.get("TMC_IMPUTE_BETA", "0.09"))
 _IMPUTE_CAP = float(os.environ.get("TMC_IMPUTE_CAP", "0.06"))
 
 
+def estimate_missing(entries: int, observed: int) -> float:
+    """Vehicles detected but never attributed a movement, as an estimate.
+
+    Only the entry gap above a fragmentation floor (BETA) counts as missing, and
+    the result is capped (CAP); both guards keep the estimate off sites where the
+    evidence is weak. Returns 0.0 when there is nothing to place.
+    """
+    if observed <= 0:
+        return 0.0
+    return min(_IMPUTE_ALPHA * max(0.0, (entries - observed) - _IMPUTE_BETA * observed),
+               _IMPUTE_CAP * observed)
+
+
 def _low_point(centroid, wheels):
     return (centroid[0] + (wheels[0] - centroid[0]) * _TALL_FRAC,
             centroid[1] + (wheels[1] - centroid[1]) * _TALL_FRAC)
-
-
-_LAST_POS = {}   # obj_id -> (cx, cy) at most recent sighting
-
-# Heading inference: a track that entered (crossed one counting line) and then
-# died mid-intersection still carries evidence of where it was going — its own
-# direction of travel. Extrapolate that heading and, if the ray meets another
-# counting line, credit the movement it was completing.
-#
-# Add-only: it never merges identities and never removes a counted vehicle, so
-# it cannot destroy a real one (unlike track stitching, which did exactly that
-# and was removed). The geometry gates itself — a fragment dying while pointed
-# at nothing recovers nothing, which is why the fragment-heavy sites are barely
-# touched. Offline replay over 12 GT hours: 95.0% -> 96.2%, 9/12 sites improved,
-# worst case -0.5. Disable with TMC_HEADING_INFER=0.
-_HEADING_INFER_ON = os.environ.get("TMC_HEADING_INFER", "1") == "1"
-_HEADING_MIN_DISP_PX = float(os.environ.get("TMC_HEADING_MIN_DISP_PX", "60"))
-
-
-def _ray_hits_segment(origin, direction, a, b, max_t=2000.0):
-    """Parametric distance at which ray origin+t*direction meets segment a-b.
-
-    Returns t > 0 if the ray crosses the segment within max_t, else None.
-    """
-    rx, ry = direction
-    sx, sy = b[0] - a[0], b[1] - a[1]
-    den = rx * sy - ry * sx
-    if abs(den) < 1e-9:
-        return None                      # parallel
-    qx, qy = a[0] - origin[0], a[1] - origin[1]
-    t = (qx * sy - qy * sx) / den        # along the ray
-    u = (qx * ry - qy * rx) / den        # along the segment
-    if t > 0 and t < max_t and 0.0 <= u <= 1.0:
-        return t
-    return None
-
-
-def infer_exit_line_by_heading(entry_line, first_pos, last_pos, LINES):
-    """The counting line this track was heading for when it died, or None."""
-    dx = last_pos[0] - first_pos[0]
-    dy = last_pos[1] - first_pos[1]
-    if math.hypot(dx, dy) < _HEADING_MIN_DISP_PX:
-        return None                      # too little travel to trust a heading
-    best = None
-    for line in LINES:
-        if line["name"] == entry_line:
-            continue
-        pts = line["points"]
-        for a, b in zip(pts, pts[1:]):
-            t = _ray_hits_segment(last_pos, (dx, dy), a, b)
-            if t is not None and (best is None or t < best[0]):
-                best = (t, line["name"])
-    return best[1] if best else None
 
 
 def _segments_intersect(p1, p2, q1, q2):
@@ -438,21 +405,15 @@ def process_single_detection(
             # approach, inventing turns (York Rd: 13 through-movements/hr became
             # phantom rights). So tall bodies fall back on a point 80% down the box.
             # Insensitive to the fraction. Kill switch: TMC_CROSS_POINT=both.
-            if _CROSS_POINT_MODE in ("tallpoint", "tallall"):
-                if (_CROSS_POINT_MODE == "tallall"
-                        or class_name not in _CENTROID_OK_CLASSES):
+            if _CROSS_POINT_MODE == "tallpoint":
+                if class_name in _CENTROID_OK_CLASSES:
+                    fb_prev, fb_cur = prev_centroid_pos, (cx, cy)
+                else:
                     fb_prev = _low_point(prev_centroid_pos, prev_wheels_pos)
                     fb_cur = _low_point((cx, cy), (wx, wy))
-                else:
-                    fb_prev, fb_cur = prev_centroid_pos, (cx, cy)
                 fallback = polyline_crosses(fb_prev, fb_cur, segments)
             else:
-                _fallback_ok = (
-                    _CROSS_POINT_MODE == "both"
-                    or (_CROSS_POINT_MODE == "shortclass"
-                        and class_name in _CENTROID_OK_CLASSES)
-                )
-                fallback = (_fallback_ok
+                fallback = (_CROSS_POINT_MODE == "both"
                             and polyline_crosses(prev_centroid_pos, (cx, cy),
                                                  segments))
             crossed = (
@@ -522,7 +483,6 @@ def process_single_detection(
                         turn_types_by_id[obj_id] = turn_type
 
     # Always update previous positions
-    _LAST_POS[obj_id] = (cx, cy)
     prev_centroids[obj_id] = (cx, cy)
     prev_wheels[obj_id] = (wx, wy)
 
@@ -634,7 +594,6 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     global _INTERSECTION_CENTER, _ENTRY_EVENTS, _MIN_DISPLACEMENT_PX, _FIRST_POS
     _ENTRY_EVENTS = []
     _FIRST_POS = {}
-    _LAST_POS.clear()
     _MIN_DISPLACEMENT_PX = float(os.environ.get("TMC_MIN_DISPLACEMENT_PX", "40"))
     _INTERSECTION_CENTER = intersection_center(LINES)
 
@@ -714,42 +673,6 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
         return transitions.get((from_dir, to_dir), 'unknown')
 
-    def apply_heading_inference():
-        """Credit a movement to entered-but-unclassified tracks using heading.
-
-        Runs per trim period (tracker IDs restart, so positions must be
-        consumed before they are cleared) and once at the end.
-        Returns the number of movements recovered.
-        """
-        if not _HEADING_INFER_ON:
-            return 0
-        recovered = 0
-        for _oid in list(entry_counted_ids):
-            if _oid in turn_types_by_id:
-                continue
-            _cs = crossing_timestamps.get(_oid)
-            if not _cs:
-                continue
-            _fp, _lp = _FIRST_POS.get(_oid), _LAST_POS.get(_oid)
-            if not _fp or not _lp:
-                continue
-            _entry = _cs[0][0]
-            _exit = infer_exit_line_by_heading(_entry, _fp, _lp, LINES)
-            if not _exit:
-                continue
-            # reuse the existing turn table by appending the inferred crossing
-            import time as _tm
-            _cs.append((_exit, _tm.time()))
-            _turn = classify_turn_from_lines(_cs)
-            if _turn in ("invalid", "unknown"):
-                _cs.pop()                 # leave the track untouched
-                continue
-            turn_types_by_id[_oid] = _turn
-            crossed_lines_by_id.setdefault(_oid, []).append(_exit)
-            recovered += 1
-        return recovered
-
-    _heading_recovered = 0
 
     # Video capture already initialized above for model manager
     current_frame = 0
@@ -977,11 +900,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                 ped_processor.crosswalk_proc.reset_state()
 
             # Clear previous positions to prevent cross-period tracking
-            _heading_recovered += apply_heading_inference()  # consume before reset
             prev_centroids.clear()
             prev_wheels.clear()
             _FIRST_POS.clear()  # tracker IDs restart per period; drop stale origins
-            _LAST_POS.clear()
             print("🧹 Previous positions cleared for new period")
 
             # Skip frames until we reach the start of this period (frame-skipping)
@@ -1505,10 +1426,6 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # Usar entry_counted_ids para el conteo total (solo vehículos que entraron desde afuera)
     total_count = len(entry_counted_ids)
 
-    _heading_recovered += apply_heading_inference()
-    if _heading_recovered:
-        print(f"🧭 Heading inference: {_heading_recovered} movement(s) recovered "
-              f"from entered-but-unclassified tracks")
 
     # Class vote finalization: replace the entry-time label with the track-life
     # confidence-weighted winner (must run BEFORE the FHWA refinement below,
@@ -1596,30 +1513,30 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # Attribution estimate (see _IMPUTE_ALPHA). `counts`/`total_count`/`validation`
     # keep the raw observation — entry_vehicles is this estimate's own input.
     imputed_vehicles = 0
-    _raw_turn_total = sum(turns_dict.values())
+    raw_turn_total = sum(turns_dict.values())
     if _IMPUTE_ON:
-        _video_obs = sum(v for _d in vehicles.get("total", {}).values()
-                         for v in _d.values())
+        video_observed = sum(v for d in vehicles.get("total", {}).values()
+                             for v in d.values())
         # Basis is the MINUTE rollup (what the report reads, and what the
         # coefficients were fitted on); it can sit below the video tally.
-        _observed = (minute_tracker.observed_total()
-                     if minute_tracker is not None else _video_obs)
-        _gap = len(entry_counted_ids) - _observed
-        _add = min(_IMPUTE_ALPHA * max(0.0, _gap - _IMPUTE_BETA * _observed),
-                   _IMPUTE_CAP * _observed)
-        if _observed > 0 and _add >= 1.0:
-            if minute_tracker is not None:
-                imputed_vehicles = minute_tracker.apply_imputation(_add)
-            # Same factor for the video-level view, whose baseline differs.
-            _factor = (_observed + _add) / _observed
-            _placed = apportion([vehicles], _video_obs * (_factor - 1.0))
-            imputed_vehicles = imputed_vehicles or _placed
+        observed = (minute_tracker.observed_total()
+                    if minute_tracker is not None else video_observed)
+        add = estimate_missing(len(entry_counted_ids), observed)
+        if add >= 1.0:
+            placed_minutes = (minute_tracker.apply_imputation(add)
+                              if minute_tracker is not None else 0)
+            # Same proportional uplift for the video-level view, whose baseline differs.
+            placed_video = apportion([vehicles], video_observed * add / observed)
+            # Report what reached the minute rows — that is what the customer
+            # report reads — falling back to the video view when there are none.
+            imputed_vehicles = (placed_minutes if minute_tracker is not None
+                                else placed_video)
             # Keep the turn summary consistent with the estimated vehicle table.
-            turns_dict = {t: sum(_d.get(t, 0) for _d in vehicles["total"].values())
+            turns_dict = {t: sum(d.get(t, 0) for d in vehicles["total"].values())
                           for t in ("left", "right", "straight", "u-turn")}
-            print(f"📈 Attribution estimate: minute_observed={_observed} "
-                  f"entries={len(entry_counted_ids)} gap={_gap} -> "
-                  f"+{int(round(_add))} estimated (video view +{_placed})")
+            print(f"📈 Attribution estimate: minute_observed={observed} "
+                  f"entries={len(entry_counted_ids)} -> +{int(round(add))} "
+                  f"estimated (video view +{placed_video})")
 
     # Finalize minute tracking. MUST come after the estimate above:
     # finalize_processing flushes every buffered minute to SQS, and a row that has
@@ -1661,7 +1578,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             "vehicles_with_movement": vehicles_with_movement,
             "unclassified_tracks": unclassified_tracks,
             "total_turns": sum(turns_dict.values()),
-            "validation_passed": vehicles_with_movement == _raw_turn_total,
+            "validation_passed": vehicles_with_movement == raw_turn_total,
             "entry_vehicles": len(entry_counted_ids),
             "imputed_vehicles": imputed_vehicles,
             "total_crossings": sum(counts.values())

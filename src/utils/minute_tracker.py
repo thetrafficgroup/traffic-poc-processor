@@ -8,7 +8,7 @@ import uuid
 from typing import Dict, List, Optional, Callable, Any, Set
 
 
-def _cells(vehicles):
+def _cells(vehicles: Dict[str, Any]) -> List[tuple]:
     """Non-zero per-class movement cells as (turns_dict, key, count)."""
     return [(turns, t, v)
             for cls, dirs in vehicles.items()
@@ -17,8 +17,8 @@ def _cells(vehicles):
             for t, v in turns.items() if isinstance(v, int) and v > 0]
 
 
-def recompute_totals(vehicles):
-    """Rebuild vehicles["total"] as the sum over per-class blocks."""
+def recompute_totals(vehicles: Dict[str, Any]) -> None:
+    """Rebuild vehicles["total"] as the sum over per-class blocks, in place."""
     tot = {}
     for cls, dirs in vehicles.items():
         if cls == "total" or not isinstance(dirs, dict):
@@ -31,8 +31,11 @@ def recompute_totals(vehicles):
         vehicles["total"] = tot
 
 
-def apportion(vehicle_blocks, add):
+def apportion(vehicle_blocks: List[Dict[str, Any]], add: float) -> int:
     """Add round(add) vehicles across `vehicle_blocks`, proportional to counts.
+
+    Mutates the blocks in place and rebuilds their "total" views. Returns the
+    number placed.
 
     Largest-remainder, not per-cell rounding: a few-percent uplift over many
     small cells rounds down far more often than up and silently loses vehicles.

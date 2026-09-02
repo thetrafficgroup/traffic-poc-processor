@@ -9,6 +9,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from tmc.tmc_processor import estimate_missing  # noqa: E402
 from utils.minute_tracker import apportion, recompute_totals  # noqa: E402
 
 DIRS = ["NORTH", "SOUTH", "EAST", "WEST"]
@@ -75,3 +76,21 @@ def test_zero_count_cells_never_receive_vehicles():
     assert v["car"]["SOUTH"]["left"] == 0
     assert v["car"]["NORTH"]["u-turn"] == 0
     assert v["car"]["NORTH"]["straight"] == 52
+
+
+def test_estimate_is_zero_without_evidence():
+    """No entries beyond what was attributed, or none at all -> nothing to place."""
+    assert estimate_missing(entries=500, observed=500) == 0.0
+    assert estimate_missing(entries=0, observed=0) == 0.0
+    assert estimate_missing(entries=100, observed=0) == 0.0
+
+
+def test_small_gap_is_absorbed_by_the_fragmentation_floor():
+    """A gap within normal fragmentation must not move the counts."""
+    assert estimate_missing(entries=1020, observed=1000) == 0.0
+
+
+def test_large_gap_is_estimated_but_capped():
+    est = estimate_missing(entries=1400, observed=1000)
+    assert est > 0
+    assert est <= 0.06 * 1000 + 1e-9
