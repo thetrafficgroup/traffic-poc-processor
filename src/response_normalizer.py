@@ -116,6 +116,10 @@ def normalize_tmc_response(result: Dict[str, Any]) -> Dict[str, Any]:
             "validation_passed": validation.get("validation_passed", 
                                                total == sum(turn_counts.values())),
             "entry_vehicles": validation.get("entry_vehicles", total),
+            # How many movements in `vehicles` are estimated rather than observed
+            # (attribution estimate). Kept so a report can always be audited back
+            # to the raw observation.
+            "imputed_vehicles": validation.get("imputed_vehicles", 0),
             "total_crossings": validation.get("total_crossings", sum(direction_counts.values()))
         },
         

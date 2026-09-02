@@ -17,7 +17,7 @@ from utils.overlap_detection import (
     soft_nms, detect_occlusions, adjust_confidence_for_occlusion,
     TrackInterpolator, post_process_detections, analyze_overlap_patterns
 )
-from utils.minute_tracker import MinuteTracker
+from utils.minute_tracker import MinuteTracker, apportion
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
 from utils.ffmpeg_writer import FFmpegH264Writer
 from utils.background_model import BackgroundProvider, model_wants_background
@@ -54,6 +54,55 @@ _DEDUP_FRAMES = 30
 # reset per video / trim period alongside the other counting state.
 _MIN_DISPLACEMENT_PX = 40
 _FIRST_POS = {}  # obj_id -> (cx, cy) at first sighting
+
+# Fallback policy for line crossings (see the crossing test below): "tallpoint"
+# (default) measures tall bodies low in the box and short classes at the centroid;
+# "both" is the legacy centroid-for-everything (what prod ran before); "wheels"
+# disables the fallback entirely and is diagnostic only.
+_CROSS_POINT_MODE = os.environ.get("TMC_CROSS_POINT", "tallpoint")
+if _CROSS_POINT_MODE not in ("tallpoint", "both", "wheels"):
+    raise ValueError(
+        f"TMC_CROSS_POINT={_CROSS_POINT_MODE!r} is not a known mode "
+        "(tallpoint, both, wheels) — refusing to start rather than silently "
+        "counting with the wrong crossing rule"
+    )
+_CENTROID_OK_CLASSES = {"car", "pickup_truck", "work_van", "motorcycle"}
+# Geometric fallback point: a fraction of the way from centroid to wheels.
+# 0.6 == 80% of box height. A tall body's CENTROID projects across lines its
+# wheels never approach (phantom turns); a point this low does not, while a
+# truck whose wheel point merely grazed the line is still recovered.
+_TALL_FRAC = float(os.environ.get("TMC_TALL_FRAC", "0.6"))
+
+# Attribution estimate: a track that entered but was never attributed a movement
+# is mostly a REAL vehicle we detected and failed to place. Over 15 GT hours that
+# entry gap predicts the true undercount at r^2=0.968 (traffic volume: 0.46), and
+# the missing vehicles follow the observed turn distribution, so they are placed
+# proportionally. BETA is a fragmentation floor, CAP a ceiling; together they fire
+# the estimate only where evidence is strong (5 of 16 GT sites, none regressed,
+# +1.2 pts pooled). Counts become ESTIMATES; raw observation stays in `counts`,
+# `total_count` and `validation`. See proc-iter-tmc/HANDOFF.md. Off: TMC_IMPUTE=0.
+_IMPUTE_ON = os.environ.get("TMC_IMPUTE", "1") == "1"
+_IMPUTE_ALPHA = float(os.environ.get("TMC_IMPUTE_ALPHA", "2.375"))
+_IMPUTE_BETA = float(os.environ.get("TMC_IMPUTE_BETA", "0.09"))
+_IMPUTE_CAP = float(os.environ.get("TMC_IMPUTE_CAP", "0.06"))
+
+
+def estimate_missing(entries: int, observed: int) -> float:
+    """Vehicles detected but never attributed a movement, as an estimate.
+
+    Only the entry gap above a fragmentation floor (BETA) counts as missing, and
+    the result is capped (CAP); both guards keep the estimate off sites where the
+    evidence is weak. Returns 0.0 when there is nothing to place.
+    """
+    if observed <= 0:
+        return 0.0
+    return min(_IMPUTE_ALPHA * max(0.0, (entries - observed) - _IMPUTE_BETA * observed),
+               _IMPUTE_CAP * observed)
+
+
+def _low_point(centroid, wheels):
+    return (centroid[0] + (wheels[0] - centroid[0]) * _TALL_FRAC,
+            centroid[1] + (wheels[1] - centroid[1]) * _TALL_FRAC)
 
 
 def _segments_intersect(p1, p2, q1, q2):
@@ -350,9 +399,26 @@ def process_single_detection(
             # True crossing: the movement segment (wheels, with centroid as a second
             # chance) intersects ANY segment of the counting polyline. Speed-independent,
             # so fast vehicles can't step over the line between frames.
+            # Wheel path is the ground truth. When the box bottom is unreliable
+            # (occluded queues, truncation) a second path is tried — but WHICH point
+            # matters: a tall body's centroid projects over lines its wheels never
+            # approach, inventing turns (York Rd: 13 through-movements/hr became
+            # phantom rights). So tall bodies fall back on a point 80% down the box.
+            # Insensitive to the fraction. Kill switch: TMC_CROSS_POINT=both.
+            if _CROSS_POINT_MODE == "tallpoint":
+                if class_name in _CENTROID_OK_CLASSES:
+                    fb_prev, fb_cur = prev_centroid_pos, (cx, cy)
+                else:
+                    fb_prev = _low_point(prev_centroid_pos, prev_wheels_pos)
+                    fb_cur = _low_point((cx, cy), (wx, wy))
+                fallback = polyline_crosses(fb_prev, fb_cur, segments)
+            else:
+                fallback = (_CROSS_POINT_MODE == "both"
+                            and polyline_crosses(prev_centroid_pos, (cx, cy),
+                                                 segments))
             crossed = (
                 polyline_crosses(prev_wheels_pos, (wx, wy), segments)
-                or polyline_crosses(prev_centroid_pos, (cx, cy), segments)
+                or fallback
             )
 
             if crossed and obj_id not in counted_ids_per_line[name]:
@@ -607,6 +673,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
         return transitions.get((from_dir, to_dir), 'unknown')
 
+
     # Video capture already initialized above for model manager
     current_frame = 0
     start_time = time.time()
@@ -644,7 +711,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         else:
             print(f"✅ Using provided video_uuid: {video_uuid}")
             
-        minute_tracker = MinuteTracker(fps, video_uuid, minute_batch_callback)
+        minute_tracker = MinuteTracker(fps, video_uuid, minute_batch_callback,
+                                       defer_batches=_IMPUTE_ON)
         print(f"📊 Enhanced minute tracking enabled for video {video_uuid}")
 
     # Initialize pedestrian/bicycle processor if crosswalks are configured
@@ -1358,6 +1426,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # Usar entry_counted_ids para el conteo total (solo vehículos que entraron desde afuera)
     total_count = len(entry_counted_ids)
 
+
     # Class vote finalization: replace the entry-time label with the track-life
     # confidence-weighted winner (must run BEFORE the FHWA refinement below,
     # which reads the base class names).
@@ -1441,7 +1510,37 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         uturn_count = turns_dict.get('u-turn', 0)
         turns_dict['straight'] = max(0, vehicles_with_movement - left_count - right_count - uturn_count)
     
-    # Finalize minute tracking if enabled
+    # Attribution estimate (see _IMPUTE_ALPHA). `counts`/`total_count`/`validation`
+    # keep the raw observation — entry_vehicles is this estimate's own input.
+    imputed_vehicles = 0
+    raw_turn_total = sum(turns_dict.values())
+    if _IMPUTE_ON:
+        video_observed = sum(v for d in vehicles.get("total", {}).values()
+                             for v in d.values())
+        # Basis is the MINUTE rollup (what the report reads, and what the
+        # coefficients were fitted on); it can sit below the video tally.
+        observed = (minute_tracker.observed_total()
+                    if minute_tracker is not None else video_observed)
+        add = estimate_missing(len(entry_counted_ids), observed)
+        if add >= 1.0:
+            placed_minutes = (minute_tracker.apply_imputation(add)
+                              if minute_tracker is not None else 0)
+            # Same proportional uplift for the video-level view, whose baseline differs.
+            placed_video = apportion([vehicles], video_observed * add / observed)
+            # Report what reached the minute rows — that is what the customer
+            # report reads — falling back to the video view when there are none.
+            imputed_vehicles = (placed_minutes if minute_tracker is not None
+                                else placed_video)
+            # Keep the turn summary consistent with the estimated vehicle table.
+            turns_dict = {t: sum(d.get(t, 0) for d in vehicles["total"].values())
+                          for t in ("left", "right", "straight", "u-turn")}
+            print(f"📈 Attribution estimate: minute_observed={observed} "
+                  f"entries={len(entry_counted_ids)} -> +{int(round(add))} "
+                  f"estimated (video view +{placed_video})")
+
+    # Finalize minute tracking. MUST come after the estimate above:
+    # finalize_processing flushes every buffered minute to SQS, and a row that has
+    # already been sent cannot be revised.
     video_duration_seconds = None
     if minute_tracker:
         video_duration_seconds = minute_tracker.finalize_processing()
@@ -1472,14 +1571,16 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         "vehicles": vehicles,
 
         "unclassified_tracks": unclassified_tracks,
+        "imputed_vehicles": imputed_vehicles,
 
         "validation": {
             "total_vehicles": total_count,
             "vehicles_with_movement": vehicles_with_movement,
             "unclassified_tracks": unclassified_tracks,
             "total_turns": sum(turns_dict.values()),
-            "validation_passed": vehicles_with_movement == sum(turns_dict.values()),
+            "validation_passed": vehicles_with_movement == raw_turn_total,
             "entry_vehicles": len(entry_counted_ids),
+            "imputed_vehicles": imputed_vehicles,
             "total_crossings": sum(counts.values())
         },
 

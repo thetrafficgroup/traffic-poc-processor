@@ -8,14 +8,69 @@ import uuid
 from typing import Dict, List, Optional, Callable, Any, Set
 
 
+def _cells(vehicles: Dict[str, Any]) -> List[tuple]:
+    """Non-zero per-class movement cells as (turns_dict, key, count)."""
+    return [(turns, t, v)
+            for cls, dirs in vehicles.items()
+            if cls != "total" and isinstance(dirs, dict)
+            for turns in dirs.values() if isinstance(turns, dict)
+            for t, v in turns.items() if isinstance(v, int) and v > 0]
+
+
+def recompute_totals(vehicles: Dict[str, Any]) -> None:
+    """Rebuild vehicles["total"] as the sum over per-class blocks, in place."""
+    tot = {}
+    for cls, dirs in vehicles.items():
+        if cls == "total" or not isinstance(dirs, dict):
+            continue
+        for d, turns in dirs.items():
+            if isinstance(turns, dict):
+                for t, v in turns.items():
+                    tot.setdefault(d, {})[t] = tot.setdefault(d, {}).get(t, 0) + int(v)
+    if tot:
+        vehicles["total"] = tot
+
+
+def apportion(vehicle_blocks: List[Dict[str, Any]], add: float) -> int:
+    """Add round(add) vehicles across `vehicle_blocks`, proportional to counts.
+
+    Mutates the blocks in place and rebuilds their "total" views. Returns the
+    number placed.
+
+    Largest-remainder, not per-cell rounding: a few-percent uplift over many
+    small cells rounds down far more often than up and silently loses vehicles.
+    """
+    cells = [c for v in vehicle_blocks for c in _cells(v)]
+    target, total = int(round(add)), sum(v for _t, _k, v in cells)
+    if target <= 0 or total <= 0:
+        return 0
+    exact = [v * target / total for _t, _k, v in cells]
+    floors = [int(e) for e in exact]
+    # tie-break on cell size so placement is deterministic, not list-order dependent
+    order = sorted(range(len(cells)), key=lambda i: (floors[i] - exact[i], -cells[i][2]))
+    for i in order[:target - sum(floors)]:
+        floors[i] += 1
+    for (turns, key, v), extra in zip(cells, floors):
+        turns[key] = v + extra
+    for v in vehicle_blocks:
+        recompute_totals(v)
+    return target
+
+
 class MinuteTracker:
     """
     Tracks vehicle detections and movements on a per-minute basis.
     Manages batching and SQS message preparation with proper vehicle-direction-turn nesting.
     """
     
-    def __init__(self, fps: float, video_uuid: str, batch_callback: Optional[Callable] = None):
+    def __init__(self, fps: float, video_uuid: str, batch_callback: Optional[Callable] = None,
+                 defer_batches: bool = False):
         self.fps = fps
+        # Hold every minute until finalize_processing so the attribution estimate
+        # (known only once the whole video is counted) can be applied before the
+        # rows are sent. Progress reporting uses a separate callback and is
+        # unaffected; a video that dies mid-run is reprocessed from scratch anyway.
+        self.defer_batches = defer_batches
         self.video_uuid = video_uuid
         self.batch_callback = batch_callback
 
@@ -144,6 +199,8 @@ class MinuteTracker:
     
     def _check_and_send_batch(self) -> None:
         """Check if we should send a batch and send it if ready."""
+        if self.defer_batches:
+            return
         completed_minutes = [m for m in self.minute_data.keys() if m < self.current_minute]
         
         # Group completed minutes into batches of BATCH_SIZE
@@ -204,6 +261,24 @@ class MinuteTracker:
         except Exception as e:
             print(f"❌ Failed to send batch {batch_id}: {e}")
     
+    def observed_total(self) -> int:
+        """Movements across buffered minutes — the basis for the estimate, since
+        the customer report reads these rows and they can sit below the video tally."""
+        return sum(v for m in self.minute_data.values()
+                   for turns in (m.get("vehicles", {}).get("total") or {}).values()
+                   for v in turns.values())
+
+    def apply_imputation(self, add: float) -> int:
+        """Distribute `add` estimated vehicles over every buffered minute."""
+        # sorted(): cell order decides remainder tie-breaks, so it must not depend
+        # on dict insertion order
+        placed = apportion([self.minute_data[m].get("vehicles", {})
+                            for m in sorted(self.minute_data)], add)
+        if placed:
+            print(f"📈 Attribution estimate: +{placed} vehicles across "
+                  f"{len(self.minute_data)} minutes")
+        return placed
+
     def finalize_processing(self) -> int:
         """
         Finalize processing and send any remaining batches.
@@ -215,10 +290,12 @@ class MinuteTracker:
         if self.current_minute in self.minute_data:
             self._finalize_minute(self.current_minute)
         
-        # Send any remaining minutes as a final batch
-        remaining_minutes = list(self.minute_data.keys())
-        if remaining_minutes:
-            self._send_batch(remaining_minutes)
+        # Send remaining minutes (all of them, when batches were deferred)
+        remaining_minutes = sorted(self.minute_data.keys())
+        while remaining_minutes:
+            chunk = remaining_minutes[:self.BATCH_SIZE]
+            self._send_batch(chunk)
+            remaining_minutes = remaining_minutes[self.BATCH_SIZE:]
         
         # Calculate total duration
         total_duration = (self.current_minute + 1) * 60  # Convert minutes to seconds
