@@ -8,61 +8,49 @@ import uuid
 from typing import Dict, List, Optional, Callable, Any, Set
 
 
-def collect_class_cells(vehicles: Dict[str, Any]) -> List[tuple]:
-    """Every non-zero per-class movement cell as (turns_dict, turn_key, count).
-
-    The "total" block is derived, never a source — see recompute_totals.
-    """
-    out = []
-    for cls, dirs in vehicles.items():
-        if cls == "total" or not isinstance(dirs, dict):
-            continue
-        for _d, turns in dirs.items():
-            if not isinstance(turns, dict):
-                continue
-            for t, v in turns.items():
-                if isinstance(v, int) and v > 0:
-                    out.append((turns, t, v))
-    return out
+def _cells(vehicles):
+    """Non-zero per-class movement cells as (turns_dict, key, count)."""
+    return [(turns, t, v)
+            for cls, dirs in vehicles.items()
+            if cls != "total" and isinstance(dirs, dict)
+            for turns in dirs.values() if isinstance(turns, dict)
+            for t, v in turns.items() if isinstance(v, int) and v > 0]
 
 
-def recompute_totals(vehicles: Dict[str, Any]) -> None:
+def recompute_totals(vehicles):
     """Rebuild vehicles["total"] as the sum over per-class blocks."""
-    tot: Dict[str, Dict[str, int]] = {}
+    tot = {}
     for cls, dirs in vehicles.items():
         if cls == "total" or not isinstance(dirs, dict):
             continue
         for d, turns in dirs.items():
-            if not isinstance(turns, dict):
-                continue
-            td = tot.setdefault(d, {})
-            for t, v in turns.items():
-                td[t] = td.get(t, 0) + int(v)
+            if isinstance(turns, dict):
+                for t, v in turns.items():
+                    tot.setdefault(d, {})[t] = tot.setdefault(d, {}).get(t, 0) + int(v)
     if tot:
         vehicles["total"] = tot
 
 
-def apportion(cells: List[tuple], add: float) -> int:
-    """Add `add` vehicles across `cells` in proportion to their counts.
+def apportion(vehicle_blocks, add):
+    """Add round(add) vehicles across `vehicle_blocks`, proportional to counts.
 
-    Uses largest-remainder apportionment: independent per-cell rounding would
-    systematically LOSE vehicles, because a ~5% uplift on many small cells
-    rounds to zero far more often than it rounds up. This adds exactly
-    round(add) vehicles, deterministically.
+    Largest-remainder, not per-cell rounding: a few-percent uplift over many
+    small cells rounds down far more often than up and silently loses vehicles.
     """
-    target = int(round(add))
-    total = sum(v for _t, _k, v in cells)
-    if target <= 0 or total <= 0 or not cells:
+    cells = [c for v in vehicle_blocks for c in _cells(v)]
+    target, total = int(round(add)), sum(v for _t, _k, v in cells)
+    if target <= 0 or total <= 0:
         return 0
     exact = [v * target / total for _t, _k, v in cells]
     floors = [int(e) for e in exact]
-    short = target - sum(floors)
-    if short > 0:
-        order = sorted(range(len(cells)), key=lambda i: (floors[i] - exact[i], -cells[i][2]))
-        for i in order[:short]:
-            floors[i] += 1
+    # tie-break on cell size so placement is deterministic, not list-order dependent
+    order = sorted(range(len(cells)), key=lambda i: (floors[i] - exact[i], -cells[i][2]))
+    for i in order[:target - sum(floors)]:
+        floors[i] += 1
     for (turns, key, v), extra in zip(cells, floors):
         turns[key] = v + extra
+    for v in vehicle_blocks:
+        recompute_totals(v)
     return target
 
 
@@ -271,32 +259,19 @@ class MinuteTracker:
             print(f"❌ Failed to send batch {batch_id}: {e}")
     
     def observed_total(self) -> int:
-        """Movements currently held across all buffered minutes.
-
-        This — not the video-level tally — is the basis for the attribution
-        estimate: the customer report reads the minute rows, and the two can
-        differ (a movement attributed after the last minute was finalized lands
-        in the video total only). The estimate's coefficients were fitted
-        against these minute sums.
-        """
+        """Movements across buffered minutes — the basis for the estimate, since
+        the customer report reads these rows and they can sit below the video tally."""
         return sum(v for m in self.minute_data.values()
-                   for _d, turns in (m.get("vehicles", {}).get("total") or {}).items()
+                   for turns in (m.get("vehicles", {}).get("total") or {}).values()
                    for v in turns.values())
 
     def apply_imputation(self, add: float) -> int:
-        """Distribute `add` estimated vehicles over every buffered minute.
-
-        Proportional to the observed movement distribution across the whole
-        video, so a dense minute receives more than a quiet one. Only valid
-        while deferring — once a batch is sent its row cannot be revised.
-        """
-        cells = []
-        for m in sorted(self.minute_data):
-            cells.extend(collect_class_cells(self.minute_data[m].get("vehicles", {})))
-        placed = apportion(cells, add)
+        """Distribute `add` estimated vehicles over every buffered minute."""
+        # sorted(): cell order decides remainder tie-breaks, so it must not depend
+        # on dict insertion order
+        placed = apportion([self.minute_data[m].get("vehicles", {})
+                            for m in sorted(self.minute_data)], add)
         if placed:
-            for m in self.minute_data:
-                recompute_totals(self.minute_data[m].get("vehicles", {}))
             print(f"📈 Attribution estimate: +{placed} vehicles across "
                   f"{len(self.minute_data)} minutes")
         return placed

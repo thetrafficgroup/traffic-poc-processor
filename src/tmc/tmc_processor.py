@@ -17,7 +17,7 @@ from utils.overlap_detection import (
     soft_nms, detect_occlusions, adjust_confidence_for_occlusion,
     TrackInterpolator, post_process_detections, analyze_overlap_patterns
 )
-from utils.minute_tracker import MinuteTracker, apportion, collect_class_cells, recompute_totals
+from utils.minute_tracker import MinuteTracker, apportion
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
 from utils.ffmpeg_writer import FFmpegH264Writer
 from utils.background_model import BackgroundProvider, model_wants_background
@@ -55,12 +55,9 @@ _DEDUP_FRAMES = 30
 _MIN_DISPLACEMENT_PX = 40
 _FIRST_POS = {}  # obj_id -> (cx, cy) at first sighting
 
-# Fallback policy for line crossings (see the crossing test below).
-# "tallpoint" (default): tall bodies fall back on a point low in the box,
-# short classes on the centroid. "shortclass": no fallback at all for tall
-# bodies (over-broad — dropped real trucks). "both": legacy, centroid fallback
-# for every class. "tallall": the low point for every class. "wheels": no
-# fallback (diagnostic only).
+# Fallback policy for line crossings (see the crossing test below): "tallpoint"
+# (default) measures tall bodies low in the box, short classes at the centroid;
+# "both" is the legacy centroid-for-everything; "wheels" disables the fallback.
 _CROSS_POINT_MODE = os.environ.get("TMC_CROSS_POINT", "tallpoint")
 _CENTROID_OK_CLASSES = {"car", "pickup_truck", "work_van", "motorcycle"}
 # Geometric fallback point: a fraction of the way from centroid to wheels.
@@ -69,28 +66,14 @@ _CENTROID_OK_CLASSES = {"car", "pickup_truck", "work_van", "motorcycle"}
 # truck whose wheel point merely grazed the line is still recovered.
 _TALL_FRAC = float(os.environ.get("TMC_TALL_FRAC", "0.6"))
 
-# Attribution estimate. A track that entered the intersection but never completed
-# a classified movement is mostly a REAL vehicle we detected and failed to
-# attribute; the rest are fragments of vehicles already counted. Over 15 ground
-# truth hours that entry gap predicts the true undercount at r^2 = 0.968 — far
-# better than traffic volume (0.46) — and 14 of 15 sites undercount, 638 vehicles
-# missing against 55 spurious. The missing vehicles follow the observed turn
-# distribution closely (70% of them are 'straight'; 'straight' is 74% of observed
-# volume), so they are placed proportionally rather than dumped into one movement.
-#
-# Only the gap ABOVE a normal fragmentation floor (BETA of observed volume) is
-# treated as missing, and the estimate is capped at CAP of observed volume. Those
-# two guards make the correction fire only where the evidence is strong: on the
-# 15 GT hours it touches 5 sites and leaves 10 untouched.
-# Leave-one-site-out through this exact code path: +1.2 pts pooled turn accuracy,
-# 5/15 sites improved, and NO site made worse.
-# A more aggressive setting (BETA=0.03, CAP=1.0) scores +2.0 pooled but costs one
-# site -3.0, which fails our no-site-below--0.5 rule; hence the guarded default.
-#
-# Counts become ESTIMATES. The raw observation is preserved in `counts`,
-# `total_count` and `validation` (entry_vehicles especially, since it is the
-# input to this estimate), and `imputed_vehicles` reports how many were added.
-# Disable entirely with TMC_IMPUTE=0.
+# Attribution estimate: a track that entered but was never attributed a movement
+# is mostly a REAL vehicle we detected and failed to place. Over 15 GT hours that
+# entry gap predicts the true undercount at r^2=0.968 (traffic volume: 0.46), and
+# the missing vehicles follow the observed turn distribution, so they are placed
+# proportionally. BETA is a fragmentation floor, CAP a ceiling; together they fire
+# the estimate only where evidence is strong (5 of 16 GT sites, none regressed,
+# +1.2 pts pooled). Counts become ESTIMATES; raw observation stays in `counts`,
+# `total_count` and `validation`. See proc-iter-tmc/HANDOFF.md. Off: TMC_IMPUTE=0.
 _IMPUTE_ON = os.environ.get("TMC_IMPUTE", "1") == "1"
 _IMPUTE_ALPHA = float(os.environ.get("TMC_IMPUTE_ALPHA", "2.375"))
 _IMPUTE_BETA = float(os.environ.get("TMC_IMPUTE_BETA", "0.09"))
@@ -449,22 +432,12 @@ def process_single_detection(
             # True crossing: the movement segment (wheels, with centroid as a second
             # chance) intersects ANY segment of the counting polyline. Speed-independent,
             # so fast vehicles can't step over the line between frames.
-            # Wheel path is the ground-truth crossing test. When the box bottom is
-            # unreliable (occluded queues, truncation) a second path is tried — but
-            # WHICH point matters. A tall body's centroid projects over lines its
-            # wheels never approach, inventing crossings (York Rd 2026-08: bus
-            # bodies clipping a far line turned 13 through-movements/hr into
-            # phantom right turns). Banning the fallback outright for tall classes
-            # (the earlier "shortclass" rule) fixed York but dropped REAL trucks
-            # whose wheel point merely grazed the line: over 16 GT hours it cost
-            # Oella -1.2, Hayshed -0.6 and Sanford -0.5, shedding heavy classes on
-            # straight movements (SUT -34, heavy_pickup -20, artic -10).
-            # So keep the fallback for every class, but evaluate tall bodies at a
-            # point 80% down the box instead of the centroid. Battery 4 (full GT
-            # hours): York 92.5 -> 95.8 (beating shortclass's 95.4) while Oella,
-            # Hayshed and Sanford all return to baseline. Insensitive to the exact
-            # fraction — 0.6 and 0.8 scored identically on all four sites.
-            # Kill switch: TMC_CROSS_POINT=both restores the old behaviour.
+            # Wheel path is the ground truth. When the box bottom is unreliable
+            # (occluded queues, truncation) a second path is tried — but WHICH point
+            # matters: a tall body's centroid projects over lines its wheels never
+            # approach, inventing turns (York Rd: 13 through-movements/hr became
+            # phantom rights). So tall bodies fall back on a point 80% down the box.
+            # Insensitive to the fraction. Kill switch: TMC_CROSS_POINT=both.
             if _CROSS_POINT_MODE in ("tallpoint", "tallall"):
                 if (_CROSS_POINT_MODE == "tallall"
                         or class_name not in _CENTROID_OK_CLASSES):
@@ -1620,19 +1593,15 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         uturn_count = turns_dict.get('u-turn', 0)
         turns_dict['straight'] = max(0, vehicles_with_movement - left_count - right_count - uturn_count)
     
-    # Attribution estimate (see _IMPUTE_ALPHA above). Applied to `vehicles` and to
-    # the buffered minute rows; `counts`, `total_count` and `validation` keep the
-    # raw observation, and entry_vehicles in particular MUST stay raw since it is
-    # the input to this estimate.
+    # Attribution estimate (see _IMPUTE_ALPHA). `counts`/`total_count`/`validation`
+    # keep the raw observation — entry_vehicles is this estimate's own input.
     imputed_vehicles = 0
     _raw_turn_total = sum(turns_dict.values())
     if _IMPUTE_ON:
         _video_obs = sum(v for _d in vehicles.get("total", {}).values()
                          for v in _d.values())
-        # Basis is the MINUTE rollup: that is what the customer report reads and
-        # what the coefficients were fitted against. It can sit below the video
-        # tally (a movement attributed after the last minute was finalized), so
-        # using the video total here would systematically under-correct.
+        # Basis is the MINUTE rollup (what the report reads, and what the
+        # coefficients were fitted on); it can sit below the video tally.
         _observed = (minute_tracker.observed_total()
                      if minute_tracker is not None else _video_obs)
         _gap = len(entry_counted_ids) - _observed
@@ -1641,12 +1610,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         if _observed > 0 and _add >= 1.0:
             if minute_tracker is not None:
                 imputed_vehicles = minute_tracker.apply_imputation(_add)
-            # Scale the video-level view by the SAME factor, so the two stay
-            # coherent even though their baselines differ.
+            # Same factor for the video-level view, whose baseline differs.
             _factor = (_observed + _add) / _observed
-            _placed = apportion(collect_class_cells(vehicles),
-                                _video_obs * (_factor - 1.0))
-            recompute_totals(vehicles)
+            _placed = apportion([vehicles], _video_obs * (_factor - 1.0))
             imputed_vehicles = imputed_vehicles or _placed
             # Keep the turn summary consistent with the estimated vehicle table.
             turns_dict = {t: sum(_d.get(t, 0) for _d in vehicles["total"].values())
