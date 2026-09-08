@@ -41,6 +41,56 @@ DEFAULT_TRUCK_FHWA = {
     "multi_articulated_truck": 11,
 }
 
+# Short, ASCII-only names for debug-video overlays. Display only - these are
+# never stored, counted or reported. Classes absent here render their raw name.
+_CLASS_ABBREV = {
+    "car": "car",
+    "pickup_truck": "pickup",
+    "work_van": "van",
+    "bus": "bus",
+    "motorcycle": "moto",
+    "motorized_vehicle": "motveh",
+    "single_unit_truck": "SUT",
+    "articulated_truck": "artic",
+    "multi_articulated_truck": "multi",
+}
+
+
+def format_display_label(coarse_class: str, fhwa_class: Optional[int] = None,
+                         axle_count: Optional[int] = None) -> str:
+    """
+    Build the short overlay caption drawn on debug videos, e.g. 'C8a3/artic'.
+
+    DISPLAY ONLY - the returned string is never a data label. It is not stored,
+    counted, reported or compared; it exists to be handed to cv2.putText.
+
+    A truck shows an FHWA bin only when the caller passes one it actually
+    recorded, so the overlay never claims more than the report does. Non-truck
+    classes fall back to their direct FHWA mapping.
+
+    Args:
+        coarse_class: Detection label (e.g., 'articulated_truck')
+        fhwa_class: FHWA bin the caller recorded, or None if it recorded none
+        axle_count: Axle count behind that bin, or None
+
+    Returns:
+        ASCII caption such as 'C2/car', 'C8a3/artic', or 'artic' when no bin is
+        known. Empty string for a missing class.
+    """
+    if not coarse_class:
+        return ""
+
+    abbrev = _CLASS_ABBREV.get(coarse_class, coarse_class)
+
+    if fhwa_class is None and coarse_class in DIRECT_FHWA_MAP:
+        fhwa_class = DIRECT_FHWA_MAP[coarse_class]
+
+    if fhwa_class is None:
+        return abbrev
+
+    axles = f"a{axle_count}" if axle_count else ""
+    return f"C{fhwa_class}{axles}/{abbrev}"
+
 
 class AxleCountClassifier:
     """
