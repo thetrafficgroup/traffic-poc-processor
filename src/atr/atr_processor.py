@@ -16,6 +16,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
 from utils.ffmpeg_writer import FFmpegH264Writer
 from utils.background_model import BackgroundProvider, model_wants_background
+from utils.axle_count_classifier import format_display_label
 
 # === Centroid Tracker ===
 def _iou_matrix(track_bboxes, det_bboxes):
@@ -948,6 +949,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     articulated_subtype_by_id = {}
     max_axle_count_by_id = {}  # used for the count's FHWA suffix
     axle_history_by_id = {}    # used for the displayed FHWA suffix (stable mode)
+    # Overlay-only state: (fhwa_class, axle_count) remembered at count time so the
+    # debug-video caption survives the pop below. Feeds cv2.putText and nothing else.
+    overlay_bin_by_id = {}
 
     # Axle detection statistics for debugging and analysis
     axle_detection_stats = {
@@ -1491,6 +1495,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                         fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
                                         if fhwa_class is not None:
                                             final_class_name = f"{class_name}_fhwa{fhwa_class}"
+                                            # Overlay-only memo (see overlay_bin_by_id); never popped.
+                                            overlay_bin_by_id[objectID] = (fhwa_class, axle_count)
                                             axle_detection_stats["fhwa_class_distribution"][fhwa_class] = \
                                                 axle_detection_stats["fhwa_class_distribution"].get(fhwa_class, 0) + 1
 
@@ -1563,11 +1569,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             detection_data = detections_map[(cx, cy)]
                             x1, y1, x2, y2 = detection_data[:4]
                             class_name_viz = class_counts_by_id.get(objectID, detection_data[4] if len(detection_data) > 4 else None)
-                            display_axles = _get_display_axle_count(objectID, axle_history_by_id)
-                            if axle_classifier and class_name_viz and display_axles is not None:
-                                fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, display_axles)
-                                if fhwa_viz is not None:
-                                    class_name_viz = f"{class_name_viz}_fhwa{fhwa_viz}"
+                            # Overlay-only caption: prefer the bin memorised at count time, else
+                            # the count's own live axle dict (same source and guard the count
+                            # uses, so the video agrees with the report). Feeds cv2.putText only.
+                            fhwa_viz, axles_viz = overlay_bin_by_id.get(objectID, (None, None))
+                            if fhwa_viz is None and axle_classifier and objectID in max_axle_count_by_id:
+                                axles_viz = max_axle_count_by_id[objectID]
+                                fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, axles_viz)
+                            class_name_viz = format_display_label(class_name_viz, fhwa_viz, axles_viz)
                             cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
                             # Wheel-anchor overlay: red = naive bbox-bottom-center,
@@ -1910,6 +1919,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                     fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
                                     if fhwa_class is not None:
                                         final_class_name = f"{class_name}_fhwa{fhwa_class}"
+                                        # Overlay-only memo (see overlay_bin_by_id); never popped.
+                                        overlay_bin_by_id[objectID] = (fhwa_class, axle_count)
                                         axle_detection_stats["fhwa_class_distribution"][fhwa_class] = \
                                             axle_detection_stats["fhwa_class_distribution"].get(fhwa_class, 0) + 1
 
@@ -1982,11 +1993,14 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         detection_data = detections_map[(cx, cy)]
                         x1, y1, x2, y2 = detection_data[:4]
                         class_name_viz = class_counts_by_id.get(objectID, detection_data[4] if len(detection_data) > 4 else None)
-                        display_axles = _get_display_axle_count(objectID, axle_history_by_id)
-                        if axle_classifier and class_name_viz and display_axles is not None:
-                            fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, display_axles)
-                            if fhwa_viz is not None:
-                                class_name_viz = f"{class_name_viz}_fhwa{fhwa_viz}"
+                        # Overlay-only caption: prefer the bin memorised at count time, else
+                        # the count's own live axle dict (same source and guard the count
+                        # uses, so the video agrees with the report). Feeds cv2.putText only.
+                        fhwa_viz, axles_viz = overlay_bin_by_id.get(objectID, (None, None))
+                        if fhwa_viz is None and axle_classifier and objectID in max_axle_count_by_id:
+                            axles_viz = max_axle_count_by_id[objectID]
+                            fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, axles_viz)
+                        class_name_viz = format_display_label(class_name_viz, fhwa_viz, axles_viz)
                         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
                         # Wheel-anchor overlay: red = naive, cyan = zenith-VP-corrected.

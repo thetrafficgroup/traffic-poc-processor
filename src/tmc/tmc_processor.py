@@ -21,6 +21,7 @@ from utils.minute_tracker import MinuteTracker, apportion
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
 from utils.ffmpeg_writer import FFmpegH264Writer
 from utils.background_model import BackgroundProvider, model_wants_background
+from utils.axle_count_classifier import format_display_label
 from crosswalk.crosswalk_processor import CrosswalkProcessor
 from crosswalk.crosswalk_minute_tracker import CrosswalkMinuteTracker
 from pedestrian.pedestrian_processor import PedestrianProcessor
@@ -608,6 +609,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     detected_classes = {}
     class_counts_by_id = {}
     max_axle_count_by_id = {}  # Track maximum axle count per vehicle for FHWA classification
+    # Overlay-only state: (fhwa_class, axle_count) remembered at count time so the
+    # debug-video caption survives the pop below. Feeds cv2.putText and nothing else.
+    overlay_bin_by_id = {}
 
     # Axle detection statistics for debugging and analysis
     axle_detection_stats = {
@@ -1051,11 +1055,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                             cls_name = class_counts_by_id.get(obj_id, raw_cls)
                             if cls_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                                 continue
-                            # Compute FHWA suffix on-demand for visualization
-                            if axle_classifier and obj_id in max_axle_count_by_id:
-                                fhwa_viz = axle_classifier.get_fhwa_class(cls_name, max_axle_count_by_id[obj_id])
-                                if fhwa_viz is not None:
-                                    cls_name = f"{cls_name}_fhwa{fhwa_viz}"
+                            # Overlay-only caption: prefer the bin memorised at count time, else
+                            # the count's own live axle dict. Never feeds counts or reports.
+                            fhwa_viz, axles_viz = overlay_bin_by_id.get(obj_id, (None, None))
+                            if fhwa_viz is None and axle_classifier and obj_id in max_axle_count_by_id:
+                                axles_viz = max_axle_count_by_id[obj_id]
+                                fhwa_viz = axle_classifier.get_fhwa_class(cls_name, axles_viz)
+                            cls_name = format_display_label(cls_name, fhwa_viz, axles_viz)
                             x1, y1, x2, y2 = box
                             cx, cy = get_centroid(box)
 
@@ -1128,6 +1134,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                             fhwa_class = axle_classifier.get_fhwa_class(vehicle_class, axle_count)
                                             if fhwa_class is not None:
                                                 vehicle_class = f"{vehicle_class}_fhwa{fhwa_class}"
+                                                # Overlay-only memo (see overlay_bin_by_id); never popped.
+                                                overlay_bin_by_id[vehicle_id] = (fhwa_class, axle_count)
 
                                     # Get origin direction (first line crossed)
                                     origin_direction = crossing_timestamps[vehicle_id][0][0].upper()
@@ -1285,11 +1293,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                         cls_name = class_counts_by_id.get(obj_id, raw_cls)
                         if cls_name in _VEHICLE_MODEL_EXCLUDE_CLASSES:
                             continue
-                        # Compute FHWA suffix on-demand for visualization
-                        if axle_classifier and obj_id in max_axle_count_by_id:
-                            fhwa_viz = axle_classifier.get_fhwa_class(cls_name, max_axle_count_by_id[obj_id])
-                            if fhwa_viz is not None:
-                                cls_name = f"{cls_name}_fhwa{fhwa_viz}"
+                        # Overlay-only caption: prefer the bin memorised at count time, else
+                        # the count's own live axle dict. Never feeds counts or reports.
+                        fhwa_viz, axles_viz = overlay_bin_by_id.get(obj_id, (None, None))
+                        if fhwa_viz is None and axle_classifier and obj_id in max_axle_count_by_id:
+                            axles_viz = max_axle_count_by_id[obj_id]
+                            fhwa_viz = axle_classifier.get_fhwa_class(cls_name, axles_viz)
+                        cls_name = format_display_label(cls_name, fhwa_viz, axles_viz)
                         x1, y1, x2, y2 = box
                         cx, cy = get_centroid(box)
 
@@ -1362,6 +1372,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                                         fhwa_class = axle_classifier.get_fhwa_class(vehicle_class, axle_count)
                                         if fhwa_class is not None:
                                             vehicle_class = f"{vehicle_class}_fhwa{fhwa_class}"
+                                            # Overlay-only memo (see overlay_bin_by_id); never popped.
+                                            overlay_bin_by_id[vehicle_id] = (fhwa_class, axle_count)
 
                                 # Get origin direction (first line crossed)
                                 origin_direction = crossing_timestamps[vehicle_id][0][0].upper()
