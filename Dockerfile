@@ -1,4 +1,6 @@
-FROM python:3.11.1-slim
+# bookworm, not bullseye: Debian 11 left LTS in 2026-08 and its debian-security
+# pool now 404s, which fails apt-get install (build 95532393, 2026-10-22).
+FROM python:3.11.17-slim-bookworm
 
 WORKDIR /
 
