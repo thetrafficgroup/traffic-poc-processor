@@ -253,8 +253,11 @@ class PedestrianProcessor:
 
     def reset_tracker(self):
         """Reset YOLO tracker state (call at trim-period boundaries)."""
-        if self.model.predictor is not None:
-            self.model.predictor.trackers = [None]
+        # In place, never [None]: with persist=True ultralytics would not rebuild it.
+        trackers = getattr(self.model.predictor, "trackers", None) or []
+        for tracker in trackers:
+            tracker.reset()
+        if trackers:
             print("🔄 Pedestrian model tracker reset")
         self._ema_positions.clear()
 
