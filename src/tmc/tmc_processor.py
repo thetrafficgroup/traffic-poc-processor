@@ -6,6 +6,7 @@ import yaml
 import tempfile
 from collections import Counter
 from ultralytics import YOLO
+from ultralytics.trackers.basetrack import BaseTrack
 import numpy as np
 import sys
 import os
@@ -822,6 +823,22 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             # Clean up axle data for this vehicle to free memory
             max_axle_count_by_id.pop(vehicle_id, None)
 
+    def close_open_tracks(last_frame):
+        """Give every still-open track its last chance and file it at `last_frame`.
+
+        Called where tracking stops (end of video, end of each trim period). Filed
+        against the LAST PROCESSED frame, never the loop's end value: that is one past
+        the end and would open an extra minute row, or under trimming file a period's
+        vehicles in the next period's first minute.
+        """
+        recovered = recover_terminal_crossings(
+            last_frame, fps, LINES, entry_counted_ids, crossing_timestamps,
+            crossed_lines_by_id, turn_types_by_id, classify_turn_from_lines,
+            flush_all=True,
+        )
+        flush_minute_vehicles(last_frame)
+        return recovered
+
 
     # Video capture already initialized above for model manager
     current_frame = 0
@@ -950,8 +967,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # Helper function to reset tracker state
     def reset_tracker():
         """Reset YOLO tracker to start fresh tracking for new period"""
-        if model.predictor is not None:
-            model.predictor.trackers = [None]
+        # In place: with persist=True ultralytics never rebuilds a tracker it already
+        # holds, so swapping in [None] crashed the first frame of the next period.
+        trackers = getattr(model.predictor, "trackers", None) or []
+        for tracker in trackers:
+            tracker.reset()
+        if trackers:
             print("🔄 YOLO tracker reset - previous tracking state cleared")
         else:
             print("🔄 YOLO tracker not initialized yet (first period)")
@@ -1043,15 +1064,20 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             print(f"   Time: {period['start_seconds']:.1f}s - {period['end_seconds']:.1f}s ({period_duration:.1f} min)")
 
             # CRITICAL: Reset tracker at start of each period
+            # reset() also zeroes the track-ID counter both trackers share, yet entries,
+            # movements and crosswalk counts are keyed by ID and persist across periods:
+            # a restarted ID would be taken for an already-counted vehicle.
+            next_track_id = BaseTrack._count
             reset_tracker()
             if ped_processor is not None:
                 ped_processor.reset_tracker()
                 ped_processor.crosswalk_proc.reset_state()
+            BaseTrack._count = next_track_id
 
             # Clear previous positions to prevent cross-period tracking
             prev_centroids.clear()
             prev_wheels.clear()
-            _FIRST_POS.clear()  # tracker IDs restart per period; drop stale origins
+            _FIRST_POS.clear()  # no track spans periods; drop stale origins
             print("🧹 Previous positions cleared for new period")
 
             # Skip frames until we reach the start of this period (frame-skipping)
@@ -1271,6 +1297,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                 frames_processed_total += 1  # Track actual frames processed
                 calculate_and_send_progress()
 
+            # The tracker is reset before the next period, so every track still open
+            # here ends here; left open, the dead-track check would only fire on the
+            # next period's first frame.
+            close_open_tracks(max(0, current_frame - 1))
+
             print(f"✅ Completed period {period_idx + 1}/{len(frame_ranges)}")
 
         print("\n✅ All trim periods processed")
@@ -1477,15 +1508,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
     # Every track still open at the last frame is dead too — the video simply ran
     # out before the tracker gave up on it — so they get the same last chance.
-    # Filed against the LAST PROCESSED frame, never current_frame: the loop leaves
-    # that one past the end, which would open an extra minute row beyond the video.
-    _last_frame = max(0, current_frame - 1)
-    _recovered = recover_terminal_crossings(
-        _last_frame, fps, LINES, entry_counted_ids, crossing_timestamps,
-        crossed_lines_by_id, turn_types_by_id, classify_turn_from_lines,
-        flush_all=True,
-    )
-    flush_minute_vehicles(_last_frame)
+    _recovered = close_open_tracks(max(0, current_frame - 1))
     if _H1_SECS > 0:
         print(f"🔁 Terminal-crossing recovery: {_H1_RECOVERED} movements "
               f"({_recovered} on the final sweep), reach {_H1_SECS}s")
