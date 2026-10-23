@@ -147,3 +147,86 @@ york_night (107) and sanford (57) are 63% of it. Per-leg detection/attribution s
 Analysis code is in `analysis/tmc-round2/`. It depends on `proc-iter-tmc/`
 (cached streams, GT, lane configs), which is **not** version controlled — see that
 directory's README.
+
+---
+
+# Round 2b — four more levers, all rejected
+
+2026-10-23. Same corpus and metric. Baseline is package C (5.22%, 791 error vehicles).
+
+## The targeting rule, which should have come first
+
+**A lost-track population is only worth mining where there is a measured undercount.**
+
+honeygo_pm holds 42 lost tracks and 33 vehicles of total error; kriders holds 216 lost
+tracks and 7. At a site that already counts correctly, the lost tracks are duplicate
+fragments of vehicles already counted, so any scheme that "recovers" them can only add
+double-counts. This one test, applied up front, would have killed zones, tracklet
+association, path-fit and line extension before any of them were built.
+
+Applying it to the whole corpus, three places still hold recoverable vehicles:
+
+| | real undercount | nature |
+|---|---|---|
+| md108 (whole site) | 150 | attribution; 80% of its 188 lost tracks are real |
+| york_night NORTH | 88 | detection; 66 of 83 lost are midblock |
+| meadowbranch NORTH | 85 | attribution; fragmenting at the entry line |
+
+md108 is the instructive one. It is the only site whose lost population is genuinely
+mostly real, and path-fit attribution *still* only reached ~42% there. Knowing that a
+vehicle is missing does not tell you where it went: it died before revealing its turn.
+That is a harder and different problem from the duplicate-versus-real question, and it
+is the honest reason md108 has resisted every round.
+
+## Line geometry — rejected
+
+`lineaudit.py` perturbs each line in units of its own length and re-scores.
+
+Extension, pooled: 5.22% (x1.00) -> 5.28% (x1.15) -> 5.33% (x1.25) -> 5.91% (x1.50),
+monotonically worse; sanford +9.38pp at x1.50. And it does not help the sites the
+short-line test flagged: honeygo_pm 2.12% -> 2.50%, honeygo_am 1.80% -> 1.92%,
+york_day 4.67% -> 6.07%. Longer lines reach into neighbouring legs' traffic.
+
+The shift sweep (moving lines along their normal) produced 12,161 error vehicles
+against 15,150 manual, which is a broken invariant rather than a finding: moving the
+lines changes which side counts as "outside", so `is_entering_from_outside` misfires
+and vehicles are re-counted. **That test is invalid and its numbers must not be
+quoted.** Testing line placement properly needs the entry/exit polygon rebuilt with
+the lines, not the lines moved underneath it.
+
+The short-line taxonomy remains useful for config QA -- a camera whose counting line
+does not span its roadway is worth flagging on its own merits -- but it does not
+predict recoverable accuracy.
+
+## imgsz upscaling — rejected
+
+`imgsz = min(max(w,h),1920)//32*32` caps inference at native resolution, so
+meadowbranch (640x480, vehicles 15.6 px tall) gets no upscaling. Tested end to end
+with `dump_tracks.py`, which runs the real tracking path and writes the harness schema,
+so the variant is scored by the shipped counting code rather than by a detection count.
+
+| stream | obs | entries | filed | L1 (+mirror) |
+|---|---|---|---|---|
+| cached (reference) | 71422 | 1522 | 1405 | 11.41% |
+| pod control, imgsz=640 | 72128 | 1507 | 1386 | 12.61% |
+| pod, imgsz=1280 | 78097 | 1506 | 1334 | **15.89%** |
+
+Per-leg entries (manual / @640 / @1280): SOUTH 801 / 673 / **637**, NORTH 740 / 790 /
+**826**. So 8.3% more observations yielded *fewer* complete vehicles.
+
+Upscaling a 640x480 source adds no information -- a 15.6 px vehicle becomes 31 px of
+interpolated pixels. The detector fires more often on no better evidence, and the extra
+detections fragment tracks and inflate the already over-counting NORTH leg.
+
+**The control earns its keep here:** the pod's own imgsz=640 run scores 12.61% against
+the cached stream's 11.41%, so roughly 0.8pp of this harness is tracker
+nondeterminism plus model/ultralytics drift. Variants must be compared against that
+control, never against the cached stream, and anything under ~0.8pp is noise.
+
+## What is left
+
+Only detection work on two approaches, plus md108's destination problem. The strongest
+remaining candidate is a brightness-gated classical detector for york_night's NORTH
+approach: its SOUTH approach is already near-exact (127 manual / 120 filed), so this is
+one approach rather than a night model, and the I-695 precedent (light-blob tracker 374
+vs 368 manual where prod scored 10) is the best evidence in the project that it works.
