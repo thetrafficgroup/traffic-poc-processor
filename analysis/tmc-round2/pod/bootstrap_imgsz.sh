@@ -100,14 +100,19 @@ flush
 
 echo "--- tracking runs=[$SITES] (site:imgsz) ---"
 for spec in $SITES; do
-  site="${spec%%:*}"; isz="${spec##*:}"
-  dest="$OUT/${site}.imgsz${isz}.tracks.csv.gz"
+  # spec is site:imgsz:enhance (enhance optional, defaults to none)
+  site=$(echo "$spec" | cut -d: -f1)
+  isz=$(echo "$spec" | cut -d: -f2)
+  enh=$(echo "$spec" | cut -d: -f3); [ -z "$enh" ] && enh=none
+  trk=$(echo "$spec" | cut -d: -f4-); [ "$trk" = "$spec" ] && trk=""
+  tag=$(echo "${trk:-ctl}" | tr -cd "A-Za-z0-9=.," | cut -c1-40)
+  dest="$OUT/${site}.${enh}.${tag}.tracks.csv.gz"
   if [ -f "$dest" ]; then echo "skip $spec (exists)"; continue; fi
   echo ">>> $spec  $(date -u +%T)"
   if [ ! -f "$W/clips/${site}.mp4" ]; then
     "$PY" "$S3" pull "$BASE/clips/${site}.mp4" "$W/clips/${site}.mp4" || { echo "PULL FAILED $site"; continue; }
   fi
-  PROCESSOR_SRC="$W/src" "$PY" "$W/dump_tracks.py" "$W/clips/${site}.mp4" \
+  PROCESSOR_SRC="$W/src" TMC_ENHANCE="$enh" TRK_OVERRIDES="$trk" "$PY" "$W/dump_tracks.py" "$W/clips/${site}.mp4" \
       "$W/models/best.pt" "$dest" "$isz" 2>&1 | tee "$OUT/${spec//:/_}.log"
   echo "<<< $spec rc=${PIPESTATUS[0]}"
   flush

@@ -230,3 +230,92 @@ remaining candidate is a brightness-gated classical detector for york_night's NO
 approach: its SOUTH approach is already near-exact (127 manual / 120 filed), so this is
 one approach rather than a night model, and the I-695 precedent (light-blob tracker 374
 vs 368 manual where prod scored 10) is the best evidence in the project that it works.
+
+---
+
+# Round 2c — fleet scan, and a result I cannot explain
+
+2026-10-23. Night work was deprioritised part way through this round (IR cameras are
+coming and the model is the binding constraint there), so everything below is daytime.
+
+## Fleet scan: 6 of 371, not ~40
+
+`tools/validate_lane_config.py` run over every TMC config in prod:
+
+```
+371 checked, 6 flagged MIRRORED (1.6%), 365 clean
+3 distinct cameras: 405427 (id 1022 = meadowbranch), 405482 (id 999), SCU4QI (ids 65-68)
+```
+
+**The earlier claim that ~40 customer cameras were mislabelled was wrong** and should be
+disregarded. It extrapolated 2-of-18 across the fleet, ignoring that the GT sample is
+selection-biased: problem cameras are precisely the ones that get manually counted.
+Video 1022's live prod metadata was confirmed through the API to be the mirrored config,
+so the 6 are real -- just far fewer than predicted.
+
+The 180-degree class stays undetectable. `locations` holds lat/lon for 55 rows but
+**no video references a camera** (`cameraId` is NULL across all 1017), so there is no
+video-to-coordinate path for an OSM bearing cross-check. That is a data-linkage gap.
+
+Separately, `videoRate` reads 30 for meadowbranch, york, sanford and md108 whose true
+rates are 10, 25, 15 and 15. Nothing should trust that column.
+
+## No resolution headroom
+
+The prod SOURCE videos, probed via presigned URLs, are natively 640x480 (meadowbranch,
+york) and 960x540 (sanford, md108) -- exactly what we already process. Upscaling was
+never viable and there is no better source to pull.
+
+## Line placement: a real effect without an explanation
+
+Moving a camera's counting lines inward along their normals, in units of each line's
+own length, recovers a lot at two cameras:
+
+| site | shipped | best | recovered |
+|---|---|---|---|
+| md108 | 8.65% | 4.27% (shift -0.050, extend 1.30) | 77 vehicles |
+| 1022_meadowbranch | 11.41% | ~7.06% (shift -0.050) | ~69 vehicles |
+
+Together ~146 vehicles, 21% of the daytime error. The symptoms move with it: md108's
+leave-frame losses fall 63 -> 29, meadowbranch's near-entry-line losses 100 -> 27.
+
+**But the mechanism is not understood, and that matters more than the number.**
+
+* First hypothesis -- md108's vehicles leave frame before reaching an exit line --
+  predicted the edge-loss drop, and that held. But it cannot explain meadowbranch,
+  which has ZERO leave-frame losses.
+* Second hypothesis -- shrinking the polygon shortens the distance a track must survive
+  -- was falsified directly: meadowbranch has the HIGHEST survival ratio of all 18 sites
+  (3.85) and benefits most.
+* Neither candidate GT-free predictor correlates with the benefit: completion rate
+  (classified/entries) gives **+0.04**, survival ratio gives **+0.00**. md108 (89.5%
+  completion) and kriders (90.2%) respond in opposite directions.
+
+A global shift is also rejected outright: pooled 5.22% -> 5.02% at -0.025, but kriders
+regresses +2.02pp and honeygo_am +3.48pp, failing the worst-site gate.
+
+**Recommendation: do NOT ship a shift rule.** Treat this as evidence that md108's and
+meadowbranch's lines deserve human re-placement against imagery, with ~146 vehicles as
+the prize and the measured optimum as a validation target. Rendering md108's lines on
+its video shows nothing obviously wrong, which is itself a reason for caution.
+
+## Tracker parameters: noise
+
+Five BoT-SORT arms on meadowbranch (10 fps), testing whether the IoU and appearance
+gates are fps-sensitive in effect:
+
+| arm | L1 |
+|---|---|
+| new_track_thresh=0.5 | 12.23% |
+| control | 12.67% |
+| match_thresh=0.9 | 12.99% |
+
+All inside the harness noise floor.
+
+## The noise floor, which every future round needs
+
+The pod's own native-resolution control scores 12.61% where the cached stream scores
+11.41% on the same configuration. That ~0.8pp is tracker nondeterminism plus model and
+ultralytics drift between the original harness run and the pod. **Any variant must be
+compared against a control produced the same way, and anything under ~0.8pp is noise.**
+Three of this round's candidate effects sit inside it.
