@@ -44,6 +44,10 @@ _ENTRY_EVENTS = []
 # Fragment de-dup window: skip a new entry already counted on the SAME line within
 # this many px / frames (the tracker splits one vehicle into several IDs).
 _DEDUP_PX = 60
+# Frames, but the fleet runs at 10, 15 and 25 fps, so a bare frame count silently
+# enforces a 3.0 s / 2.0 s / 1.2 s window depending on the camera. Re-derived per video
+# in process_video as min(30, 2 s) -- min(), never max(), so 15 and 25 fps cameras keep
+# the shipped behaviour exactly and only sub-15 fps cameras change.
 _DEDUP_FRAMES = 30
 
 # Minimum net displacement (px) a track must have travelled since it was first seen
@@ -685,12 +689,16 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # Endpoints only, never the intermediate bend vertices: including them would drag
     # the centre toward whichever approach was drawn with more vertices and silently
     # change the gate for every already-processed study.
-    global _INTERSECTION_CENTER, _ENTRY_EVENTS, _MIN_DISPLACEMENT_PX, _FIRST_POS, _H1_LAST, _H1_RECOVERED
+    global _INTERSECTION_CENTER, _ENTRY_EVENTS, _MIN_DISPLACEMENT_PX, _FIRST_POS, _H1_LAST, _H1_RECOVERED, _DEDUP_FRAMES
     _ENTRY_EVENTS = []
     _FIRST_POS = {}
     _H1_LAST = {}
     _H1_RECOVERED = 0
     _MIN_DISPLACEMENT_PX = float(os.environ.get("TMC_MIN_DISPLACEMENT_PX", "40"))
+    _DEDUP_FRAMES = int(os.environ.get(
+        "TMC_DEDUP_FRAMES", min(30, round(float(os.environ.get("TMC_DEDUP_SECS", "2.0")) * (fps or 15.0)))))
+    print(f"\U0001f501 Fragment de-dup window: {_DEDUP_FRAMES} frames "
+          f"({_DEDUP_FRAMES / (fps or 15.0):.1f}s at {fps:.0f} fps)")
     _INTERSECTION_CENTER = intersection_center(LINES)
 
     counts = {line["name"]: 0 for line in LINES}
