@@ -75,6 +75,28 @@ _CENTROID_OK_CLASSES = {"car", "pickup_truck", "work_van", "motorcycle"}
 # truck whose wheel point merely grazed the line is still recovered.
 _TALL_FRAC = float(os.environ.get("TMC_TALL_FRAC", "0.6"))
 
+# Terminal-crossing recovery: a track that dies ON its exit line never registers
+# the crossing, because the crossing test needs two consecutive positions that
+# STRADDLE the line. Across 18 GT hours, 1,429 tracks (10.3%) were entry-counted
+# but never classified, and 31.9% of those stop within three quarters of a box
+# height of a line they never registered. Carrying the track's own final velocity
+# forward recovers the movement; the reach is ONE SECOND of its measured motion,
+# which means the same distance at 10 and 25 fps and at both fleet resolutions.
+#
+# Validated leave-one-site-out (reach chosen on 17 sites, scored on the 18th) over
+# 15,150 manually counted vehicles: movement error 8.34% -> 7.57%, -116 vehicles.
+# 15 of 18 folds pick 1.0 s and so does the full corpus. Off: TMC_H1_RECOVER_SECS=0.
+_H1_SECS = float(os.environ.get("TMC_H1_RECOVER_SECS", "1.0"))
+# Frames a track must be missing before it is treated as dead. Matches the
+# BoT-SORT track buffer: past it the tracker will not reuse the ID, so the
+# crossing list can no longer grow and the recovery decision is final.
+_H1_DEAD_FRAMES = int(os.environ.get("TMC_H1_DEAD_FRAMES", "30"))
+# Below this per-frame displacement the heading is noise, not motion, and
+# extrapolating it would point the tip in an arbitrary direction.
+_H1_MIN_SPEED_PX = float(os.environ.get("TMC_H1_MIN_SPEED_PX", "1.0"))
+_H1_LAST = {}  # obj_id -> (prev_frame, prev_wx, prev_wy, frame, wx, wy)
+_H1_RECOVERED = 0  # movements recovered in the current video, for the results payload
+
 # Attribution estimate: a track that entered but was never attributed a movement
 # is mostly a REAL vehicle we detected and failed to place. Over 15 GT hours that
 # entry gap predicts the true undercount at r^2=0.968 (traffic volume: 0.46), and
@@ -83,7 +105,14 @@ _TALL_FRAC = float(os.environ.get("TMC_TALL_FRAC", "0.6"))
 # the estimate only where evidence is strong (5 of 16 GT sites, none regressed,
 # +1.2 pts pooled). Counts become ESTIMATES; raw observation stays in `counts`,
 # `total_count` and `validation`. See proc-iter-tmc/HANDOFF.md. Off: TMC_IMPUTE=0.
-_IMPUTE_ON = os.environ.get("TMC_IMPUTE", "1") == "1"
+#
+# The estimate and the recovery above are NOT additive: the recovery places the
+# very vehicles the estimate was extrapolating from. Leave-one-site-out, recovery
+# alone scores 7.57% and recovery + this estimate 7.79%, against 8.34% for the
+# estimate alone — so enabling one retires the other unless TMC_IMPUTE is set
+# explicitly. Re-fitting ALPHA/BETA/CAP on top of the recovery was also tried and
+# does not generalise: 7.14% in-sample, 7.60% held out.
+_IMPUTE_ON = os.environ.get("TMC_IMPUTE", "0" if _H1_SECS > 0 else "1") == "1"
 _IMPUTE_ALPHA = float(os.environ.get("TMC_IMPUTE_ALPHA", "2.375"))
 _IMPUTE_BETA = float(os.environ.get("TMC_IMPUTE_BETA", "0.09"))
 _IMPUTE_CAP = float(os.environ.get("TMC_IMPUTE_CAP", "0.06"))
@@ -268,6 +297,62 @@ def _build_tracker_config(fps: float) -> str:
           f"model={config.get('model')}")
     return tmp.name
 
+
+
+def recover_terminal_crossings(current_frame, fps, LINES, entry_counted_ids,
+                               crossing_timestamps, crossed_lines_by_id,
+                               turn_types_by_id, classify_turn_fn,
+                               flush_all=False):
+    """Give a track that died on its exit line one chance to have crossed it.
+
+    See _H1_SECS. Only entry-counted tracks with no movement yet are eligible, and
+    only lines they have not already registered, so this can add a MOVEMENT but
+    never an ENTRY — the estimate's `entries` term is untouched either way.
+
+    Runs at track death rather than at end of video on purpose: the minute tracker
+    files each vehicle in the minute its movement completes, so recovering at the
+    end would heap every recovered vehicle into the final minute of the report.
+
+    Returns the number of movements recovered.
+    """
+    global _H1_RECOVERED
+    if _H1_SECS <= 0:
+        return 0
+    step = _H1_SECS * (fps or 15.0)
+    added = 0
+    dead = [i for i, v in _H1_LAST.items()
+            if flush_all or current_frame - v[3] > _H1_DEAD_FRAMES]
+    for obj_id in dead:
+        prev_frame, pwx, pwy, last_frame, wx, wy = _H1_LAST.pop(obj_id)
+        if obj_id not in entry_counted_ids or obj_id in turn_types_by_id:
+            continue
+        timestamps = crossing_timestamps.get(obj_id)
+        if not timestamps:
+            continue
+        frame_gap = max(1, last_frame - prev_frame)
+        vx, vy = (wx - pwx) / frame_gap, (wy - pwy) / frame_gap
+        if math.hypot(vx, vy) < _H1_MIN_SPEED_PX:
+            continue
+        tip = (wx + vx * step, wy + vy * step)
+        already = {crossing[0] for crossing in timestamps}
+        for line in LINES:
+            if line["name"] in already:
+                continue
+            if not polyline_crosses((wx, wy), tip, line["segments"]):
+                continue
+            # inf sorts last, so the recovered line becomes the destination leg
+            # and the real first crossing stays the origin.
+            timestamps.append((line["name"], float("inf")))
+            turn_type = classify_turn_fn(timestamps)
+            if turn_type in ("left", "right", "straight"):
+                turn_types_by_id[obj_id] = turn_type
+                crossed_lines_by_id.setdefault(obj_id, []).append(line["name"])
+                added += 1
+                _H1_RECOVERED += 1
+            else:
+                timestamps.pop()
+            break
+    return added
 
 
 def build_analysis_by_vehicle_class(detected_classes, turn_types_by_id, crossing_timestamps, crossed_lines_by_id):
@@ -488,6 +573,13 @@ def process_single_detection(
     prev_centroids[obj_id] = (cx, cy)
     prev_wheels[obj_id] = (wx, wy)
 
+    # Last two WHEEL sightings with their frames, for recover_terminal_crossings.
+    # Frames are kept because a track can miss frames, and the final velocity has
+    # to be per frame rather than per sighting or a gap would inflate it.
+    if _H1_SECS > 0:
+        previous = _H1_LAST.get(obj_id)
+        latest = (current_frame, wx, wy)
+        _H1_LAST[obj_id] = (previous[3:] if previous else latest) + latest
 
 
 def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None, progress_callback=None, minute_batch_callback=None, generate_video_output=False, output_video_path=None, trim_periods=None, pedestrian_model_path=None, truck_classifier_model_path=None, axle_detector_model_path=None):
@@ -594,9 +686,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
     # Endpoints only, never the intermediate bend vertices: including them would drag
     # the centre toward whichever approach was drawn with more vertices and silently
     # change the gate for every already-processed study.
-    global _INTERSECTION_CENTER, _ENTRY_EVENTS, _MIN_DISPLACEMENT_PX, _FIRST_POS
+    global _INTERSECTION_CENTER, _ENTRY_EVENTS, _MIN_DISPLACEMENT_PX, _FIRST_POS, _H1_LAST, _H1_RECOVERED
     _ENTRY_EVENTS = []
     _FIRST_POS = {}
+    _H1_LAST = {}
+    _H1_RECOVERED = 0
     _MIN_DISPLACEMENT_PX = float(os.environ.get("TMC_MIN_DISPLACEMENT_PX", "40"))
     _INTERSECTION_CENTER = intersection_center(LINES)
 
@@ -722,14 +816,20 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             max_axle_count_by_id.pop(vehicle_id, None)
 
     def close_open_tracks(last_frame):
-        """File every still-open track at `last_frame`.
+        """Give every still-open track its last chance and file it at `last_frame`.
 
         Called where tracking stops (end of video, end of each trim period). Filed
         against the LAST PROCESSED frame, never the loop's end value: that is one past
         the end and would open an extra minute row, or under trimming file a period's
         vehicles in the next period's first minute.
         """
+        recovered = recover_terminal_crossings(
+            last_frame, fps, LINES, entry_counted_ids, crossing_timestamps,
+            crossed_lines_by_id, turn_types_by_id, classify_turn_from_lines,
+            flush_all=True,
+        )
         flush_minute_vehicles(last_frame)
+        return recovered
 
 
     # Video capture already initialized above for model manager
@@ -1175,6 +1275,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                     # Write frame to output video
                     video_writer.write(frame)
 
+                # A track the tracker has given up on cannot register any further
+                # crossing, so its last chance to have crossed is taken here, before
+                # the minute flush that would otherwise file it as unclassified.
+                recover_terminal_crossings(
+                    current_frame, fps, LINES, entry_counted_ids, crossing_timestamps,
+                    crossed_lines_by_id, turn_types_by_id, classify_turn_from_lines,
+                )
                 flush_minute_vehicles(current_frame)
 
                 # Progress tracking
@@ -1377,6 +1484,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
                 # Write frame to output video
                 video_writer.write(frame)
 
+            # A track the tracker has given up on cannot register any further
+            # crossing, so its last chance to have crossed is taken here, before
+            # the minute flush that would otherwise file it as unclassified.
+            recover_terminal_crossings(
+                current_frame, fps, LINES, entry_counted_ids, crossing_timestamps,
+                crossed_lines_by_id, turn_types_by_id, classify_turn_from_lines,
+            )
             flush_minute_vehicles(current_frame)
 
             # Progress tracking
@@ -1384,9 +1498,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
             frames_processed_total += 1  # Track actual frames processed (same as current_frame in normal mode)
             calculate_and_send_progress()
 
-    # Every track still open at the last frame still has to be filed — the video
-    # simply ran out before the tracker gave up on it.
-    close_open_tracks(max(0, current_frame - 1))
+    # Every track still open at the last frame is dead too — the video simply ran
+    # out before the tracker gave up on it — so they get the same last chance.
+    _recovered = close_open_tracks(max(0, current_frame - 1))
+    if _H1_SECS > 0:
+        print(f"🔁 Terminal-crossing recovery: {_H1_RECOVERED} movements "
+              f"({_recovered} on the final sweep), reach {_H1_SECS}s")
 
     # Send final 100% progress
     if progress_callback:
@@ -1574,6 +1691,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
 
         "unclassified_tracks": unclassified_tracks,
         "imputed_vehicles": imputed_vehicles,
+        "terminal_recoveries": _H1_RECOVERED,
 
         "validation": {
             "total_vehicles": total_count,
