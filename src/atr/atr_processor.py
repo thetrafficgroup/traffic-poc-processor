@@ -16,7 +16,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
 from utils.ffmpeg_writer import FFmpegH264Writer
 from utils.background_model import BackgroundProvider, model_wants_background
-from utils.axle_count_classifier import format_display_label
+from utils.axle_count_classifier import aggregate_axle_reads, format_display_label
 
 # === Centroid Tracker ===
 def _iou_matrix(track_bboxes, det_bboxes):
@@ -345,14 +345,6 @@ def _update_track_class(objectID, raw_class, conf, class_counts_by_id,
         return argmax_class
     challenger_run_by_id[objectID] = (argmax_class, count)
     return current
-
-
-def _get_display_axle_count(objectID, axle_history_by_id, min_samples=3):
-    """Mode of recent axle reads once we have ``min_samples``+; else None."""
-    history = axle_history_by_id.get(objectID)
-    if not history or len(history) < min_samples:
-        return None
-    return Counter(history).most_common(1)[0][0]
 
 
 def find_vehicle_lane_with_source(cx, cy, wx, wy, lane_polygons_buffered, bbox=None):
@@ -947,8 +939,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     class_score_by_id = {}
     challenger_run_by_id = {}
     articulated_subtype_by_id = {}
-    max_axle_count_by_id = {}  # used for the count's FHWA suffix
-    axle_history_by_id = {}    # used for the displayed FHWA suffix (stable mode)
+    axle_history_by_id = {}  # objectID -> recent axle reads, graded by aggregate_axle_reads
     # Overlay-only state: (fhwa_class, axle_count) remembered at count time so the
     # debug-video caption survives the pop below. Feeds cv2.putText and nothing else.
     overlay_bin_by_id = {}
@@ -995,20 +986,19 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         axle_detection_stats["trucks_detected"] += 1
         axle_detection_stats["detection_by_truck_type"][class_name]["attempted"] += 1
         axle_detection_stats["axle_detection_attempted"] += 1
-        if axle_classifier and objectID in max_axle_count_by_id:
-            axle_count = max_axle_count_by_id[objectID]
+        axle_count = aggregate_axle_reads(axle_history_by_id.get(objectID)) if axle_classifier else None
+        if axle_count is not None:
             axle_detection_stats["axle_detection_successful"] += 1
             axle_detection_stats["detection_by_truck_type"][class_name]["successful"] += 1
             axle_detection_stats["axle_counts_distribution"][axle_count] = \
                 axle_detection_stats["axle_counts_distribution"].get(axle_count, 0) + 1
-            fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
+            fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count, low_reads_unreliable=True)
             if fhwa_class is not None:
                 final_class_name = f"{class_name}_fhwa{fhwa_class}"
                 # Overlay-only memo (see overlay_bin_by_id); never popped.
                 overlay_bin_by_id[objectID] = (fhwa_class, axle_count)
                 axle_detection_stats["fhwa_class_distribution"][fhwa_class] = \
                     axle_detection_stats["fhwa_class_distribution"].get(fhwa_class, 0) + 1
-        max_axle_count_by_id.pop(objectID, None)
         axle_history_by_id.pop(objectID, None)
         _book_count(frame_no, objectID, final_class_name, lane_id)
 
@@ -1378,15 +1368,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         if len(matched_detection) > 6:
                             wheels_x, wheels_y = matched_detection[5], matched_detection[6]
 
-                    # Detect axles for trucks (accumulate max across frames)
+                    # Detect axles for trucks (per-frame reads, graded by their mode)
                     # Every 2nd frame: at 1-in-5 a truck counted on a young track got no read at all
                     # Note: We do NOT store FHWA suffix in class_counts_by_id here to avoid breaking
                     # subsequent axle detection checks. FHWA is computed on-demand for visualization/output.
                     if axle_classifier and bbox is not None and frame_count % 2 == 0 and (class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck") or objectID in pending_trucks):
                         axle_count = axle_classifier.detect_axles(frame, bbox)
                         if axle_count is not None:
-                            current_max = max_axle_count_by_id.get(objectID, 0)
-                            max_axle_count_by_id[objectID] = max(current_max, axle_count)
                             history = axle_history_by_id.setdefault(objectID, [])
                             history.append(axle_count)
                             if len(history) > 20:
@@ -1536,7 +1524,6 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 del previous_positions[objectID]
                                 last_known_lane.pop(objectID, None)
                                 if objectID not in pending_trucks:
-                                    max_axle_count_by_id.pop(objectID, None)
                                     axle_history_by_id.pop(objectID, None)
                                 class_score_by_id.pop(objectID, None)
                                 challenger_run_by_id.pop(objectID, None)
@@ -1595,9 +1582,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             # the count's own live axle dict (same source and guard the count
                             # uses, so the video agrees with the report). Feeds cv2.putText only.
                             fhwa_viz, axles_viz = overlay_bin_by_id.get(objectID, (None, None))
-                            if fhwa_viz is None and axle_classifier and objectID in max_axle_count_by_id:
-                                axles_viz = max_axle_count_by_id[objectID]
-                                fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, axles_viz)
+                            if fhwa_viz is None and axle_classifier:
+                                axles_viz = aggregate_axle_reads(axle_history_by_id.get(objectID))
+                                if axles_viz is not None:
+                                    fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, axles_viz, low_reads_unreliable=True)
                             class_name_viz = format_display_label(class_name_viz, fhwa_viz, axles_viz)
                             cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
@@ -1776,15 +1764,13 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     if len(matched_detection) > 6:
                         wheels_x, wheels_y = matched_detection[5], matched_detection[6]
 
-                # Detect axles for trucks (accumulate max across frames) - normal mode
+                # Detect axles for trucks (per-frame reads, graded by their mode) - normal mode
                 # Every 2nd frame: at 1-in-5 a truck counted on a young track got no read at all
                 # Note: We do NOT store FHWA suffix in class_counts_by_id here to avoid breaking
                 # subsequent axle detection checks. FHWA is computed on-demand for visualization/output.
                 if axle_classifier and bbox is not None and frame_count % 2 == 0 and (class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck") or objectID in pending_trucks):
                     axle_count = axle_classifier.detect_axles(frame, bbox)
                     if axle_count is not None:
-                        current_max = max_axle_count_by_id.get(objectID, 0)
-                        max_axle_count_by_id[objectID] = max(current_max, axle_count)
                         history = axle_history_by_id.setdefault(objectID, [])
                         history.append(axle_count)
                         if len(history) > 20:
@@ -1934,7 +1920,6 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             del previous_positions[objectID]
                             last_known_lane.pop(objectID, None)
                             if objectID not in pending_trucks:
-                                max_axle_count_by_id.pop(objectID, None)
                                 axle_history_by_id.pop(objectID, None)
                             class_score_by_id.pop(objectID, None)
                             challenger_run_by_id.pop(objectID, None)
@@ -1993,9 +1978,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         # the count's own live axle dict (same source and guard the count
                         # uses, so the video agrees with the report). Feeds cv2.putText only.
                         fhwa_viz, axles_viz = overlay_bin_by_id.get(objectID, (None, None))
-                        if fhwa_viz is None and axle_classifier and objectID in max_axle_count_by_id:
-                            axles_viz = max_axle_count_by_id[objectID]
-                            fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, axles_viz)
+                        if fhwa_viz is None and axle_classifier:
+                            axles_viz = aggregate_axle_reads(axle_history_by_id.get(objectID))
+                            if axles_viz is not None:
+                                fhwa_viz = axle_classifier.get_fhwa_class(class_name_viz, axles_viz, low_reads_unreliable=True)
                         class_name_viz = format_display_label(class_name_viz, fhwa_viz, axles_viz)
                         cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
 
