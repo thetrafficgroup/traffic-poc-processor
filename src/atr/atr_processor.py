@@ -952,6 +952,11 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Overlay-only state: (fhwa_class, axle_count) remembered at count time so the
     # debug-video caption survives the pop below. Feeds cv2.putText and nothing else.
     overlay_bin_by_id = {}
+    # A truck keeps collecting axle reads after it crosses the line (on long trucks
+    # the rear axles often come into view only then), so its class is booked when
+    # its track ends -- still at the crossing frame.
+    pending_trucks = {}  # objectID -> (crossing frame, class_name, lane_id)
+    PENDING_TRUCK_MAX_SECONDS = 5
 
     # Axle detection statistics for debugging and analysis
     axle_detection_stats = {
@@ -970,6 +975,48 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     # Track raw detection labels by lane (use defaultdict pattern)
     from collections import defaultdict
     vehicle_counts_by_lane = defaultdict(lambda: defaultdict(int))
+
+    def _book_count(frame_no, objectID, final_class_name, lane_id):
+        if objectID not in detected_classes:
+            detected_classes[objectID] = final_class_name
+        vehicle_counts_by_lane[final_class_name][lane_id] += 1
+        if minute_tracker:
+            # The minute tracker ships a minute as soon as a later one is recorded;
+            # trucks still pending from an earlier minute must land before that.
+            minute = minute_tracker.calculate_minute_from_frame(frame_no)
+            for oid, (f, _, _) in list(pending_trucks.items()):
+                if oid in pending_trucks and minute_tracker.calculate_minute_from_frame(f) < minute:
+                    _finalize_truck(oid)
+            minute_tracker.process_vehicle_detection(frame_no, objectID, final_class_name, lane_id)
+
+    def _finalize_truck(objectID):
+        frame_no, class_name, lane_id = pending_trucks.pop(objectID)
+        final_class_name = class_name
+        axle_detection_stats["trucks_detected"] += 1
+        axle_detection_stats["detection_by_truck_type"][class_name]["attempted"] += 1
+        axle_detection_stats["axle_detection_attempted"] += 1
+        if axle_classifier and objectID in max_axle_count_by_id:
+            axle_count = max_axle_count_by_id[objectID]
+            axle_detection_stats["axle_detection_successful"] += 1
+            axle_detection_stats["detection_by_truck_type"][class_name]["successful"] += 1
+            axle_detection_stats["axle_counts_distribution"][axle_count] = \
+                axle_detection_stats["axle_counts_distribution"].get(axle_count, 0) + 1
+            fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
+            if fhwa_class is not None:
+                final_class_name = f"{class_name}_fhwa{fhwa_class}"
+                # Overlay-only memo (see overlay_bin_by_id); never popped.
+                overlay_bin_by_id[objectID] = (fhwa_class, axle_count)
+                axle_detection_stats["fhwa_class_distribution"][fhwa_class] = \
+                    axle_detection_stats["fhwa_class_distribution"].get(fhwa_class, 0) + 1
+        max_axle_count_by_id.pop(objectID, None)
+        axle_history_by_id.pop(objectID, None)
+        _book_count(frame_no, objectID, final_class_name, lane_id)
+
+    def _finalize_ended_trucks(frame_no, everything=False):
+        for oid, (f, _, _) in list(pending_trucks.items()):
+            if oid in pending_trucks and (everything or oid not in tracker.objects
+                                          or frame_no - f > PENDING_TRUCK_MAX_SECONDS * fps):
+                _finalize_truck(oid)
 
     # Video capture already initialized above for model manager
     frame_count = 0
@@ -1090,6 +1137,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     def reset_centroid_tracker():
         """Reset CentroidTracker to start fresh tracking for new period"""
         nonlocal tracker
+        _finalize_ended_trucks(frame_count, everything=True)
         next_id = tracker.nextObjectID
         tracker = CentroidTracker(
         max_disappeared=15,
@@ -1261,6 +1309,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
                 # Update tracker
                 objects = tracker.update(np.array(input_centroids), input_bboxes if input_bboxes else None)
+                _finalize_ended_trucks(frame_count)
 
                 # Diagnostic-frame trigger for D1/D2 emission
                 is_diag_frame = debug_emitter.is_diagnostic_frame(detections_map, objects)
@@ -1330,10 +1379,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             wheels_x, wheels_y = matched_detection[5], matched_detection[6]
 
                     # Detect axles for trucks (accumulate max across frames)
-                    # Sample every 5 frames to reduce computation while maintaining accuracy
+                    # Every 2nd frame: at 1-in-5 a truck counted on a young track got no read at all
                     # Note: We do NOT store FHWA suffix in class_counts_by_id here to avoid breaking
                     # subsequent axle detection checks. FHWA is computed on-demand for visualization/output.
-                    if axle_classifier and bbox is not None and frame_count % 5 == 0 and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                    if axle_classifier and bbox is not None and frame_count % 2 == 0 and (class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck") or objectID in pending_trucks):
                         axle_count = axle_classifier.detect_axles(frame, bbox)
                         if axle_count is not None:
                             current_max = max_axle_count_by_id.get(objectID, 0)
@@ -1478,44 +1527,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                     (lane_id, int(crossing_point[0]), int(crossing_point[1]), frame_count)
                                 )
 
-                                # Determine final class name with FHWA-specific label for trucks
-                                # Track axle detection stats for trucks
                                 if class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
-                                    axle_detection_stats["trucks_detected"] += 1
-                                    axle_detection_stats["detection_by_truck_type"][class_name]["attempted"] += 1
-                                    axle_detection_stats["axle_detection_attempted"] += 1
-
-                                    if axle_classifier and objectID in max_axle_count_by_id:
-                                        axle_count = max_axle_count_by_id[objectID]
-                                        axle_detection_stats["axle_detection_successful"] += 1
-                                        axle_detection_stats["detection_by_truck_type"][class_name]["successful"] += 1
-                                        axle_detection_stats["axle_counts_distribution"][axle_count] = \
-                                            axle_detection_stats["axle_counts_distribution"].get(axle_count, 0) + 1
-
-                                        fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
-                                        if fhwa_class is not None:
-                                            final_class_name = f"{class_name}_fhwa{fhwa_class}"
-                                            # Overlay-only memo (see overlay_bin_by_id); never popped.
-                                            overlay_bin_by_id[objectID] = (fhwa_class, axle_count)
-                                            axle_detection_stats["fhwa_class_distribution"][fhwa_class] = \
-                                                axle_detection_stats["fhwa_class_distribution"].get(fhwa_class, 0) + 1
-
-                                # Count detected class only ONCE per unique object ID
-                                if objectID not in detected_classes:
-                                    detected_classes[objectID] = final_class_name
-
-                                # Use detection label (with FHWA suffix when available)
-                                vehicle_counts_by_lane[final_class_name][lane_id] += 1
-
-                                # Track in minute tracker if enabled
-                                if minute_tracker:
-                                    minute_tracker.process_vehicle_detection(frame_count, objectID, final_class_name, lane_id)
+                                    pending_trucks[objectID] = (frame_count, class_name, lane_id)
+                                else:
+                                    _book_count(frame_count, objectID, final_class_name, lane_id)
 
                                 # Clean up per-track state for counted vehicle to free memory
                                 del previous_positions[objectID]
                                 last_known_lane.pop(objectID, None)
-                                max_axle_count_by_id.pop(objectID, None)  # Clean up axle data too
-                                axle_history_by_id.pop(objectID, None)
+                                if objectID not in pending_trucks:
+                                    max_axle_count_by_id.pop(objectID, None)
+                                    axle_history_by_id.pop(objectID, None)
                                 class_score_by_id.pop(objectID, None)
                                 challenger_run_by_id.pop(objectID, None)
                                 articulated_subtype_by_id.pop(objectID, None)
@@ -1688,6 +1710,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
 
             # Update tracker
             objects = tracker.update(np.array(input_centroids), input_bboxes if input_bboxes else None)
+            _finalize_ended_trucks(frame_count)
 
             # Diagnostic-frame trigger for D1/D2 emission
             is_diag_frame = debug_emitter.is_diagnostic_frame(detections_map, objects)
@@ -1754,10 +1777,10 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         wheels_x, wheels_y = matched_detection[5], matched_detection[6]
 
                 # Detect axles for trucks (accumulate max across frames) - normal mode
-                # Sample every 5 frames to reduce computation while maintaining accuracy
+                # Every 2nd frame: at 1-in-5 a truck counted on a young track got no read at all
                 # Note: We do NOT store FHWA suffix in class_counts_by_id here to avoid breaking
                 # subsequent axle detection checks. FHWA is computed on-demand for visualization/output.
-                if axle_classifier and bbox is not None and frame_count % 5 == 0 and class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+                if axle_classifier and bbox is not None and frame_count % 2 == 0 and (class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck") or objectID in pending_trucks):
                     axle_count = axle_classifier.detect_axles(frame, bbox)
                     if axle_count is not None:
                         current_max = max_axle_count_by_id.get(objectID, 0)
@@ -1902,44 +1925,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 (lane_id, int(crossing_point[0]), int(crossing_point[1]), frame_count)
                             )
 
-                            # Determine final class name with FHWA-specific label for trucks - normal mode
-                            # Track axle detection stats for trucks - normal mode
                             if class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
-                                axle_detection_stats["trucks_detected"] += 1
-                                axle_detection_stats["detection_by_truck_type"][class_name]["attempted"] += 1
-                                axle_detection_stats["axle_detection_attempted"] += 1
-
-                                if axle_classifier and objectID in max_axle_count_by_id:
-                                    axle_count = max_axle_count_by_id[objectID]
-                                    axle_detection_stats["axle_detection_successful"] += 1
-                                    axle_detection_stats["detection_by_truck_type"][class_name]["successful"] += 1
-                                    axle_detection_stats["axle_counts_distribution"][axle_count] = \
-                                        axle_detection_stats["axle_counts_distribution"].get(axle_count, 0) + 1
-
-                                    fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
-                                    if fhwa_class is not None:
-                                        final_class_name = f"{class_name}_fhwa{fhwa_class}"
-                                        # Overlay-only memo (see overlay_bin_by_id); never popped.
-                                        overlay_bin_by_id[objectID] = (fhwa_class, axle_count)
-                                        axle_detection_stats["fhwa_class_distribution"][fhwa_class] = \
-                                            axle_detection_stats["fhwa_class_distribution"].get(fhwa_class, 0) + 1
-
-                            # Count detected class only ONCE per unique object ID
-                            if objectID not in detected_classes:
-                                detected_classes[objectID] = final_class_name
-
-                            # Use detection label (with FHWA suffix when available)
-                            vehicle_counts_by_lane[final_class_name][lane_id] += 1
-
-                            # Track in minute tracker if enabled
-                            if minute_tracker:
-                                minute_tracker.process_vehicle_detection(frame_count, objectID, final_class_name, lane_id)
+                                pending_trucks[objectID] = (frame_count, class_name, lane_id)
+                            else:
+                                _book_count(frame_count, objectID, final_class_name, lane_id)
 
                             # Clean up per-track state for counted vehicle to free memory
                             del previous_positions[objectID]
                             last_known_lane.pop(objectID, None)
-                            max_axle_count_by_id.pop(objectID, None)  # Clean up axle data too
-                            axle_history_by_id.pop(objectID, None)
+                            if objectID not in pending_trucks:
+                                max_axle_count_by_id.pop(objectID, None)
+                                axle_history_by_id.pop(objectID, None)
                             class_score_by_id.pop(objectID, None)
                             challenger_run_by_id.pop(objectID, None)
                             articulated_subtype_by_id.pop(objectID, None)
@@ -2078,6 +2074,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         print("✅ GPU memory cache cleared")
+
+    _finalize_ended_trucks(frame_count, everything=True)
 
     # Finalize minute tracking if enabled
     total_duration = None
