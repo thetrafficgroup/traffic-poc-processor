@@ -12,6 +12,7 @@ Usage:
 """
 
 import numpy as np
+from collections import Counter
 from typing import Optional, List
 from ultralytics import YOLO
 
@@ -54,6 +55,23 @@ _CLASS_ABBREV = {
     "articulated_truck": "artic",
     "multi_articulated_truck": "multi",
 }
+
+# Two AGREEING reads (ties resolve low). Three left 0/32 trucks graded on the
+# I-695 0700 bin: the wheel detector fires on only a few frames of a track.
+_MIN_AXLE_SAMPLES = 2
+
+
+def aggregate_axle_reads(reads: Optional[List[int]], min_samples: int = _MIN_AXLE_SAMPLES) -> Optional[int]:
+    """Mode of a track's axle reads (ties -> the lower count), or None below ``min_samples``.
+
+    Not the max: the measured failure is EXTRA wheels (split dual tyres, a
+    neighbour's wheel in the padded crop, a tail light), and a max only ratchets up.
+    """
+    if not reads or len(reads) < min_samples:
+        return None
+    counts = Counter(reads)
+    best = max(counts.values())
+    return min(v for v, c in counts.items() if c == best)
 
 
 def format_display_label(coarse_class: str, fhwa_class: Optional[int] = None,
@@ -179,13 +197,20 @@ class AxleCountClassifier:
         return axle_count
 
     @staticmethod
-    def get_fhwa_class(coarse_class: str, axle_count: Optional[int]) -> Optional[int]:
+    def get_fhwa_class(coarse_class: str, axle_count: Optional[int],
+                       low_reads_unreliable: bool = False) -> Optional[int]:
         """
         Map coarse class + axle count to FHWA class.
 
         Args:
             coarse_class: Detection label (e.g., 'articulated_truck')
             axle_count: Number of axles, or None if unknown
+            low_reads_unreliable: ATR only. On ATR footage ~1% of ~7,600 semis
+                ever read 5 axles (on-axis views and crops truncated by the
+                imgsz box ceiling under-read), while the customer's manual
+                class 9 was ~75% of combination trucks. So an articulated
+                truck is class 9 unless a read shows 6+, and class 8 is never
+                emitted. TMC has not been measured and keeps the axle rule.
 
         Returns:
             FHWA class number (1-13), or None for unknown classes
@@ -205,6 +230,8 @@ class AxleCountClassifier:
 
         elif coarse_class == "articulated_truck":
             # Range: 8-10
+            if low_reads_unreliable:
+                return 10 if axle_count is not None and axle_count >= 6 else 9
             if axle_count is None or axle_count <= 4:
                 return 8  # Default (conservative)
             elif axle_count == 5:
