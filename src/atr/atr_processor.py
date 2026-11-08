@@ -4,7 +4,7 @@ import json
 import time
 from shapely.geometry import Point, Polygon, LineString, box as shapely_box
 from ultralytics import YOLO
-from collections import OrderedDict, Counter, defaultdict
+from collections import OrderedDict, Counter, defaultdict, deque
 from .atr_minute_tracker import ATRMinuteTracker
 from .sahi_helper import sliced_predict, derive_lane_region
 import sys
@@ -412,6 +412,70 @@ def _atr_json_default(obj):
     if isinstance(obj, set):
         return list(obj)
     raise TypeError(f"Type {type(obj).__name__} not JSON serializable")
+
+
+# Dedup layer 3 (re-birth). Layers 1-2 compare a new crossing against where a counted vehicle WAS
+# at count time. When the counted track dies and the same vehicle is re-acquired as a new track a
+# few frames later, it has already moved off that position and was counted again: 11 of 34 extra
+# counts on MD43 12:00, and most double-counted vans/trucks (round 5, 2026-11-04). This layer
+# compares against where the counted vehicle is NOW.
+REBIRTH_DEDUP_ENABLED = os.environ.get("ATR_REBIRTH_DEDUP", "1") == "1"
+REBIRTH_WINDOW_S = 1.5        # larger vehicles re-count up to ~1.5 s after the real count
+REBIRTH_OVERLAP_THRESH = 0.5  # of the smaller box
+# Unlit roads measure road luma 3-12, streetlit 28-46, day >= 50. On unlit footage the detector
+# misses most vehicles and this layer only removed real ones (-62% -> -64%), so it is off there.
+REBIRTH_MIN_ROAD_LUMA = 20
+
+
+def _track_velocity(positions):
+    if not positions or len(positions) < 2:
+        return (0.0, 0.0)
+    k = min(len(positions), 5)
+    (x0, y0), (x1, y1) = positions[-k], positions[-1]
+    return ((x1 - x0) / (k - 1), (y1 - y0) / (k - 1))
+
+
+def _rebirth_dominated(bbox, lane_id, frame_count, fps, recent_tracks, tracker, object_id):
+    if bbox is None:
+        return False
+    cur = shapely_box(*bbox)
+    for oid, lane, counted_bbox, (vx, vy), counted_at in recent_tracks:
+        dt = frame_count - counted_at
+        if oid == object_id or counted_bbox is None or lane != lane_id or dt > REBIRTH_WINDOW_S * fps:
+            continue
+        # Project from the track's last matched box (a few frames old) while the tracker still holds
+        # it; extrapolating the count-time box over ~15 frames overshoots under perspective.
+        last = tracker.bboxes.get(oid)
+        k = tracker.disappeared.get(oid, 0) if last is not None else dt
+        base = last if last is not None else counted_bbox
+        ref = shapely_box(base[0] + vx * k, base[1] + vy * k, base[2] + vx * k, base[3] + vy * k)
+        m = min(cur.area, ref.area)
+        if m > 0 and cur.intersection(ref).area / m > REBIRTH_OVERLAP_THRESH:
+            return True
+    return False
+
+
+class _RoadLuma:
+    """Median road brightness inside the lane polygons over the last 30 s, sampled once a second."""
+
+    def __init__(self, lane_polygons, fps):
+        self.polys = [np.array(poly.exterior.coords, dtype=np.int32) for _, poly in lane_polygons]
+        self.every = max(1, int(round(fps or 1)))
+        self.samples = deque(maxlen=30)
+        self.mask = None
+        self.lit = True
+
+    def update(self, frame, frame_count):
+        if self.samples and frame_count % self.every:
+            return
+        if self.mask is None:
+            self.mask = np.zeros(frame.shape[:2], np.uint8)
+            cv2.fillPoly(self.mask, self.polys, 255)
+        if not self.mask.any():
+            return
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        self.samples.append(cv2.mean(gray, mask=self.mask)[0])
+        self.lit = float(np.median(self.samples)) >= REBIRTH_MIN_ROAD_LUMA
 
 
 class _ATRDebugEmitter:
@@ -900,6 +964,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     last_known_lane = {}
     recently_counted_bboxes = []  # [(bbox_tuple, frame_count)] for overlap dedup
     recently_counted_positions = []  # [(lane_id, cx, cy, frame_count)] for position dedup
+    recently_counted_tracks = []  # [(object_id, lane_id, bbox, velocity, frame_count)] for re-birth dedup
+    road_luma = _RoadLuma(lane_polygons, fps)
     tracker = CentroidTracker(
         max_disappeared=15,
         max_distance=30,          # was 150; tight to prevent hijacking of
@@ -1224,6 +1290,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 if not ret:
                     print(f"⚠️ Video ended at frame {frame_count} during period {period_idx + 1}")
                     break
+                road_luma.update(frame, frame_count)
 
                 # YOLO detection
                 if _use_sahi:
@@ -1468,9 +1535,19 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                         dedup_layer = "position"
                                         break
 
+                            if (not dedup_dominated and REBIRTH_DEDUP_ENABLED and road_luma.lit
+                                    and _rebirth_dominated(bbox, lane_id, frame_count, fps,
+                                                           recently_counted_tracks, tracker, objectID)):
+                                dedup_dominated = True
+                                dedup_layer = "rebirth"
+                                counted_ids.add(objectID)  # the vehicle just counted; it must not count later either
+
                             if not dedup_dominated:
                                 accepted_count = True
                                 counted_ids.add(objectID)
+                                recently_counted_tracks.append((
+                                    objectID, lane_id, tuple(bbox) if bbox is not None else None,
+                                    _track_velocity(previous_positions.get(objectID)), frame_count))
                                 lane_counts[lane_id] += 1
                                 if bbox is not None:
                                     recently_counted_bboxes.append((tuple(bbox), frame_count))
@@ -1547,6 +1624,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                 # Prune dedup lists
                 recently_counted_bboxes = [(b, f) for b, f in recently_counted_bboxes if frame_count - f <= fps]
                 recently_counted_positions = [(l, x, y, f) for l, x, y, f in recently_counted_positions if frame_count - f <= int(fps * 0.5)]
+                recently_counted_tracks = [t for t in recently_counted_tracks if frame_count - t[4] <= 2 * fps]
 
                 # Add visualizations if generating output video
                 if generate_video_output and video_writer:
@@ -1651,6 +1729,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             ret, frame = cap.read()
             if not ret:
                 break
+            road_luma.update(frame, frame_count)
 
             # YOLO detection
             if _use_sahi:
@@ -1892,9 +1971,19 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                     dedup_layer = "position"
                                     break
 
+                        if (not dedup_dominated and REBIRTH_DEDUP_ENABLED and road_luma.lit
+                                and _rebirth_dominated(bbox, lane_id, frame_count, fps,
+                                                       recently_counted_tracks, tracker, objectID)):
+                            dedup_dominated = True
+                            dedup_layer = "rebirth"
+                            counted_ids.add(objectID)  # the vehicle just counted; it must not count later either
+
                         if not dedup_dominated:
                             accepted_count = True
                             counted_ids.add(objectID)
+                            recently_counted_tracks.append((
+                                objectID, lane_id, tuple(bbox) if bbox is not None else None,
+                                _track_velocity(previous_positions.get(objectID)), frame_count))
                             lane_counts[lane_id] += 1
                             if bbox is not None:
                                 recently_counted_bboxes.append((tuple(bbox), frame_count))
@@ -1971,6 +2060,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
             # Prune dedup lists
             recently_counted_bboxes = [(b, f) for b, f in recently_counted_bboxes if frame_count - f <= fps]
             recently_counted_positions = [(l, x, y, f) for l, x, y, f in recently_counted_positions if frame_count - f <= int(fps * 0.5)]
+            recently_counted_tracks = [t for t in recently_counted_tracks if frame_count - t[4] <= 2 * fps]
 
             # Add visualizations if generating output video
             if generate_video_output and video_writer:
