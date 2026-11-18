@@ -13,7 +13,7 @@ import torch
 import gc
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
-from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
+from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods, compute_img_size
 from utils.ffmpeg_writer import FFmpegH264Writer
 from utils.background_model import BackgroundProvider, model_wants_background
 from utils.axle_count_classifier import format_display_label
@@ -425,6 +425,10 @@ REBIRTH_OVERLAP_THRESH = 0.5  # of the smaller box
 # Unlit roads measure road luma 3-12, streetlit 28-46, day >= 50. On unlit footage the detector
 # misses most vehicles and this layer only removed real ones (-62% -> -64%), so it is off there.
 REBIRTH_MIN_ROAD_LUMA = 20
+# Native imgsz and the late area-weighted class are day-only: on dark road (dawn 1011, MD43 unlit)
+# native size lost 7-24% of vehicles, and at streetlit night (MASS 21:00, 22:15) the area vote
+# turned headlight-swollen boxes into single-unit trucks (round 2, 2026-11-17).
+DAY_MIN_ROAD_LUMA = 50
 
 
 def _track_velocity(positions):
@@ -464,6 +468,7 @@ class _RoadLuma:
         self.samples = deque(maxlen=30)
         self.mask = None
         self.lit = True
+        self.day = True
 
     def update(self, frame, frame_count):
         if self.samples and frame_count % self.every:
@@ -475,7 +480,9 @@ class _RoadLuma:
             return
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         self.samples.append(cv2.mean(gray, mask=self.mask)[0])
-        self.lit = float(np.median(self.samples)) >= REBIRTH_MIN_ROAD_LUMA
+        med = float(np.median(self.samples))
+        self.lit = med >= REBIRTH_MIN_ROAD_LUMA
+        self.day = med >= DAY_MIN_ROAD_LUMA
 
 
 class _ATRDebugEmitter:
@@ -923,6 +930,17 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps = cap.get(cv2.CAP_PROP_FPS)
 
+    # 1408 was picked on 1080p clips. On 640-wide CountCam video it upscales 2.2x, which caps
+    # every box near 218 px, splits long trucks and cost 12-15% volume on unseen and glare
+    # cameras (classification round 1, 2026-11-17). Native size, never above the old 1408,
+    # leaves HD video exactly as before. ATR_IMGSZ=<int> pins a size (1408 = old behaviour).
+    _imgsz_env = os.environ.get("ATR_IMGSZ", "native")
+    _ATR_IMGSZ = (min(compute_img_size(int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                                       int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))), 1408)
+                  if _imgsz_env == "native" else int(_imgsz_env))
+    _ATR_IMGSZ_DARK = 1408 if _imgsz_env == "native" else _ATR_IMGSZ
+    print(f"📐 ATR YOLO imgsz={_ATR_IMGSZ} (dark road: {_ATR_IMGSZ_DARK})")
+
     # Load optional truck subtype classifier
     truck_classifier = None
     if truck_classifier_model_path:
@@ -988,7 +1006,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
         conf_threshold=CONF_THRESHOLD,
         agnostic_nms=AGNOSTIC_NMS,
         iou_threshold_default_ultralytics=0.5,
-        imgsz=1408,
+        imgsz=_ATR_IMGSZ,
         lane_polygon_buffer_px=0,
         tracker={"max_disappeared": tracker.max_disappeared,
                  "max_distance": tracker.max_distance,
@@ -1079,6 +1097,86 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     if model_wants_background(model):
         print("🌄 4-channel background-conditioned model detected — building background model")
         bg_provider = BackgroundProvider(VIDEO_PATH, fps, total_frames)
+
+    # Count booking. The count itself happens at the finish line; with ATR_LATE_CLASS_SECS > 0
+    # the vehicle is booked (class, FHWA, lane tally, minute row) that many seconds later, so
+    # its class can use the larger views just past the line. The class is a vote weighted by
+    # confidence x box area: the plain confidence vote at the line is dominated by far, small
+    # views (round 1: heavy vehicles 35% -> 58% correct). Bookings are filed against the crossing
+    # frame, and the delay is the same for every vehicle so they stay in crossing order: the
+    # minute tracker closes a minute as soon as a later one is booked, so a per-vehicle delay
+    # would drop late bookings into closed minutes. 0 = old behaviour.
+    _late_class_frames = int(round(float(os.environ.get("ATR_LATE_CLASS_SECS", "1.0")) * (fps or 0)))
+    # Axle reads come out low (tandems merge, far-side wheels), so a semi read at <=4 axles is
+    # usually a 5-axle C9, not a C8: 67 C8 vs 15 on I-695. Only 6+ reliable axles move it to C10.
+    _semi_prior9 = os.environ.get("ATR_SEMI_PRIOR9", "1") == "1"
+    pending_bookings = deque()
+    class_area_score_by_id = {}
+
+    def _fhwa_for(class_name, axle_count):
+        if _semi_prior9 and class_name == "articulated_truck":
+            return 10 if axle_count is not None and axle_count >= 6 else 9
+        return axle_classifier.get_fhwa_class(class_name, axle_count)
+
+    def _add_area_vote(objectID, raw_class, conf, bbox):
+        canonical = (articulated_subtype_by_id.get(objectID, raw_class)
+                     if raw_class in ("articulated_truck", "multi_articulated_truck") else raw_class)
+        area = max(0.0, float(bbox[2]) - float(bbox[0])) * max(0.0, float(bbox[3]) - float(bbox[1]))
+        scores = class_area_score_by_id.setdefault(objectID, {})
+        scores[canonical] = scores.get(canonical, 0.0) + float(conf) * area
+
+    def _book_count(objectID, lane_id, frame_count, class_name):
+        final_class_name = class_name
+        # Determine final class name with FHWA-specific label for trucks
+        # Track axle detection stats for trucks
+        if class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
+            axle_detection_stats["trucks_detected"] += 1
+            axle_detection_stats["detection_by_truck_type"][class_name]["attempted"] += 1
+            axle_detection_stats["axle_detection_attempted"] += 1
+
+            if axle_classifier and objectID in max_axle_count_by_id:
+                axle_count = max_axle_count_by_id[objectID]
+                axle_detection_stats["axle_detection_successful"] += 1
+                axle_detection_stats["detection_by_truck_type"][class_name]["successful"] += 1
+                axle_detection_stats["axle_counts_distribution"][axle_count] = \
+                    axle_detection_stats["axle_counts_distribution"].get(axle_count, 0) + 1
+
+                fhwa_class = _fhwa_for(class_name, axle_count)
+                if fhwa_class is not None:
+                    final_class_name = f"{class_name}_fhwa{fhwa_class}"
+                    # Overlay-only memo (see overlay_bin_by_id); never popped.
+                    overlay_bin_by_id[objectID] = (fhwa_class, axle_count)
+                    axle_detection_stats["fhwa_class_distribution"][fhwa_class] = \
+                        axle_detection_stats["fhwa_class_distribution"].get(fhwa_class, 0) + 1
+
+        # Count detected class only ONCE per unique object ID
+        if objectID not in detected_classes:
+            detected_classes[objectID] = final_class_name
+
+        # Use detection label (with FHWA suffix when available)
+        vehicle_counts_by_lane[final_class_name][lane_id] += 1
+
+        # Track in minute tracker if enabled
+        if minute_tracker:
+            minute_tracker.process_vehicle_detection(frame_count, objectID, final_class_name, lane_id)
+
+        # Clean up per-track state for counted vehicle to free memory
+        max_axle_count_by_id.pop(objectID, None)  # Clean up axle data too
+        axle_history_by_id.pop(objectID, None)
+        class_score_by_id.pop(objectID, None)
+        challenger_run_by_id.pop(objectID, None)
+        articulated_subtype_by_id.pop(objectID, None)
+        class_area_score_by_id.pop(objectID, None)
+        debug_emitter._emit({"event": "count_booked", "object_id": int(objectID), "frame": int(frame_count),
+                             "timestamp_seconds": round(frame_count / fps, 3) if fps else None,
+                             "lane_id": lane_id, "final_class_name": final_class_name})
+        return final_class_name
+
+    def _flush_bookings(now_frame):
+        while pending_bookings and (now_frame is None or pending_bookings[0][0] <= now_frame):
+            _, oid, lane, cross_frame, cls_at_line, day = pending_bookings.popleft()
+            scores = class_area_score_by_id.get(oid) if day else None
+            _book_count(oid, lane, cross_frame, max(scores, key=scores.get) if scores else cls_at_line)
 
     # Initialize minute tracker if callback provided
     minute_tracker = None
@@ -1304,8 +1402,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         nms_iou=0.3,
                     )
                 else:
-                    results = model.predict(bg_provider.stack(frame, frame_count) if bg_provider else frame, conf=CONF_THRESHOLD, agnostic_nms=AGNOSTIC_NMS, iou=0.5, verbose=False, imgsz=1408)
+                    results = model.predict(bg_provider.stack(frame, frame_count) if bg_provider else frame, conf=CONF_THRESHOLD, agnostic_nms=AGNOSTIC_NMS, iou=0.5, verbose=False, imgsz=_ATR_IMGSZ if road_luma.day else _ATR_IMGSZ_DARK)
                 results = _filter_predictions(results, model.names)
+                _flush_bookings(frame_count)
                 boxes = results[0].boxes
 
                 input_centroids = []
@@ -1385,6 +1484,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                             objectID, raw_class, raw_conf, class_counts_by_id,
                             class_score_by_id, challenger_run_by_id,
                             articulated_subtype_by_id)
+                        _add_area_vote(objectID, raw_class, raw_conf, matched_detection[:4])
                     else:
                         class_name = class_counts_by_id.get(objectID, raw_class)
 
@@ -1555,47 +1655,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                     (lane_id, int(crossing_point[0]), int(crossing_point[1]), frame_count)
                                 )
 
-                                # Determine final class name with FHWA-specific label for trucks
-                                # Track axle detection stats for trucks
-                                if class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
-                                    axle_detection_stats["trucks_detected"] += 1
-                                    axle_detection_stats["detection_by_truck_type"][class_name]["attempted"] += 1
-                                    axle_detection_stats["axle_detection_attempted"] += 1
-
-                                    if axle_classifier and objectID in max_axle_count_by_id:
-                                        axle_count = max_axle_count_by_id[objectID]
-                                        axle_detection_stats["axle_detection_successful"] += 1
-                                        axle_detection_stats["detection_by_truck_type"][class_name]["successful"] += 1
-                                        axle_detection_stats["axle_counts_distribution"][axle_count] = \
-                                            axle_detection_stats["axle_counts_distribution"].get(axle_count, 0) + 1
-
-                                        fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
-                                        if fhwa_class is not None:
-                                            final_class_name = f"{class_name}_fhwa{fhwa_class}"
-                                            # Overlay-only memo (see overlay_bin_by_id); never popped.
-                                            overlay_bin_by_id[objectID] = (fhwa_class, axle_count)
-                                            axle_detection_stats["fhwa_class_distribution"][fhwa_class] = \
-                                                axle_detection_stats["fhwa_class_distribution"].get(fhwa_class, 0) + 1
-
-                                # Count detected class only ONCE per unique object ID
-                                if objectID not in detected_classes:
-                                    detected_classes[objectID] = final_class_name
-
-                                # Use detection label (with FHWA suffix when available)
-                                vehicle_counts_by_lane[final_class_name][lane_id] += 1
-
-                                # Track in minute tracker if enabled
-                                if minute_tracker:
-                                    minute_tracker.process_vehicle_detection(frame_count, objectID, final_class_name, lane_id)
-
-                                # Clean up per-track state for counted vehicle to free memory
+                                if _late_class_frames > 0:
+                                    pending_bookings.append((frame_count + _late_class_frames, objectID, lane_id, frame_count, class_name, road_luma.day))
+                                else:
+                                    final_class_name = _book_count(objectID, lane_id, frame_count, class_name)
                                 del previous_positions[objectID]
                                 last_known_lane.pop(objectID, None)
-                                max_axle_count_by_id.pop(objectID, None)  # Clean up axle data too
-                                axle_history_by_id.pop(objectID, None)
-                                class_score_by_id.pop(objectID, None)
-                                challenger_run_by_id.pop(objectID, None)
-                                articulated_subtype_by_id.pop(objectID, None)
 
                         debug_emitter.emit_count_decision(
                             frame_count=frame_count,
@@ -1743,8 +1808,9 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                     nms_iou=0.3,
                 )
             else:
-                results = model.predict(bg_provider.stack(frame, frame_count) if bg_provider else frame, conf=CONF_THRESHOLD, agnostic_nms=AGNOSTIC_NMS, iou=0.5, verbose=False, imgsz=1408)
+                results = model.predict(bg_provider.stack(frame, frame_count) if bg_provider else frame, conf=CONF_THRESHOLD, agnostic_nms=AGNOSTIC_NMS, iou=0.5, verbose=False, imgsz=_ATR_IMGSZ if road_luma.day else _ATR_IMGSZ_DARK)
             results = _filter_predictions(results, model.names)
+            _flush_bookings(frame_count)
             boxes = results[0].boxes
 
             input_centroids = []
@@ -1821,6 +1887,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                         objectID, raw_class, raw_conf, class_counts_by_id,
                         class_score_by_id, challenger_run_by_id,
                         articulated_subtype_by_id)
+                    _add_area_vote(objectID, raw_class, raw_conf, matched_detection[:4])
                 else:
                     class_name = class_counts_by_id.get(objectID, raw_class)
 
@@ -1991,47 +2058,12 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
                                 (lane_id, int(crossing_point[0]), int(crossing_point[1]), frame_count)
                             )
 
-                            # Determine final class name with FHWA-specific label for trucks - normal mode
-                            # Track axle detection stats for trucks - normal mode
-                            if class_name in ("single_unit_truck", "articulated_truck", "multi_articulated_truck"):
-                                axle_detection_stats["trucks_detected"] += 1
-                                axle_detection_stats["detection_by_truck_type"][class_name]["attempted"] += 1
-                                axle_detection_stats["axle_detection_attempted"] += 1
-
-                                if axle_classifier and objectID in max_axle_count_by_id:
-                                    axle_count = max_axle_count_by_id[objectID]
-                                    axle_detection_stats["axle_detection_successful"] += 1
-                                    axle_detection_stats["detection_by_truck_type"][class_name]["successful"] += 1
-                                    axle_detection_stats["axle_counts_distribution"][axle_count] = \
-                                        axle_detection_stats["axle_counts_distribution"].get(axle_count, 0) + 1
-
-                                    fhwa_class = axle_classifier.get_fhwa_class(class_name, axle_count)
-                                    if fhwa_class is not None:
-                                        final_class_name = f"{class_name}_fhwa{fhwa_class}"
-                                        # Overlay-only memo (see overlay_bin_by_id); never popped.
-                                        overlay_bin_by_id[objectID] = (fhwa_class, axle_count)
-                                        axle_detection_stats["fhwa_class_distribution"][fhwa_class] = \
-                                            axle_detection_stats["fhwa_class_distribution"].get(fhwa_class, 0) + 1
-
-                            # Count detected class only ONCE per unique object ID
-                            if objectID not in detected_classes:
-                                detected_classes[objectID] = final_class_name
-
-                            # Use detection label (with FHWA suffix when available)
-                            vehicle_counts_by_lane[final_class_name][lane_id] += 1
-
-                            # Track in minute tracker if enabled
-                            if minute_tracker:
-                                minute_tracker.process_vehicle_detection(frame_count, objectID, final_class_name, lane_id)
-
-                            # Clean up per-track state for counted vehicle to free memory
+                            if _late_class_frames > 0:
+                                pending_bookings.append((frame_count + _late_class_frames, objectID, lane_id, frame_count, class_name, road_luma.day))
+                            else:
+                                final_class_name = _book_count(objectID, lane_id, frame_count, class_name)
                             del previous_positions[objectID]
                             last_known_lane.pop(objectID, None)
-                            max_axle_count_by_id.pop(objectID, None)  # Clean up axle data too
-                            axle_history_by_id.pop(objectID, None)
-                            class_score_by_id.pop(objectID, None)
-                            challenger_run_by_id.pop(objectID, None)
-                            articulated_subtype_by_id.pop(objectID, None)
 
                     debug_emitter.emit_count_decision(
                         frame_count=frame_count,
@@ -2168,6 +2200,8 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", progress_callbac
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         print("✅ GPU memory cache cleared")
+
+    _flush_bookings(None)
 
     # Finalize minute tracking if enabled
     total_duration = None
