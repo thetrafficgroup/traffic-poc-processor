@@ -19,7 +19,7 @@ from utils.overlap_detection import (
     TrackInterpolator, post_process_detections, analyze_overlap_patterns
 )
 from utils.minute_tracker import MinuteTracker, apportion
-from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods
+from utils.frame_utils import calculate_frame_ranges_from_seconds, validate_trim_periods, compute_img_size
 from utils.ffmpeg_writer import FFmpegH264Writer
 from utils.background_model import BackgroundProvider, model_wants_background
 from utils.axle_count_classifier import format_display_label
@@ -262,13 +262,6 @@ def line_label_anchor(points):
     i = (len(points) - 1) // 2
     (x1, y1), (x2, y2) = points[i], points[i + 1]
     return ((x1 + x2) // 2, (y1 + y2) // 2)
-
-
-def _compute_img_size(width: int, height: int, cap: int = 1920) -> int:
-    """Choose YOLO imgsz from video resolution, capped and rounded to 32."""
-    longest = max(width, height)
-    size = min(longest, cap)
-    return (size // 32) * 32 or 32
 
 
 def _build_tracker_config(fps: float) -> str:
@@ -637,7 +630,7 @@ def process_video(VIDEO_PATH, LINES_DATA, MODEL_PATH="best.pt", video_uuid=None,
         raise ValueError(f"Invalid video dimensions ({video_width}x{video_height}): {VIDEO_PATH}")
 
     # Compute resolution-aware inference size
-    img_size = _compute_img_size(video_width, video_height)
+    img_size = compute_img_size(video_width, video_height)
     print(f"📐 Video {video_width}x{video_height} → YOLO imgsz={img_size}")
 
     # Build fps-aware tracker config (temp file — cleaned up in finally block)

@@ -161,3 +161,10 @@ def validate_trim_periods(trim_periods):
             return (False, f"Period {i+1} has invalid start/end values: {e}")
 
     return (True, None)
+
+
+def compute_img_size(width: int, height: int, cap: int = 1920) -> int:
+    """Choose YOLO imgsz from video resolution, capped and rounded to 32."""
+    longest = max(width, height)
+    size = min(longest, cap)
+    return (size // 32) * 32 or 32
