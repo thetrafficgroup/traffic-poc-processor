@@ -6,6 +6,7 @@ from app import process_video
 from aws_utils import download_s3_file, send_sqs_message, upload_s3_file
 from response_normalizer import normalize_response
 from log_capture import LogCapture, upload_log_to_s3
+from utils.video_container import ensure_indexed_mp4
 
 # S3 client for log uploads
 s3_client = boto3.client("s3")
@@ -76,7 +77,7 @@ def _process_video_job(event, bucket, video_key, video_uuid, lines_data, model_k
 
     # Use video_uuid to create unique filenames for parallel processing
     # This prevents race conditions where multiple jobs overwrite each other's files
-    video_path = download_s3_file(bucket, video_key, f"video_{video_uuid}.mp4")
+    video_path = ensure_indexed_mp4(download_s3_file(bucket, video_key, f"video_{video_uuid}.mp4"))
 
     # Download the YOLO model
     model_path = download_s3_file(bucket, model_key, "best.pt")
